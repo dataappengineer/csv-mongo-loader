@@ -1,9 +1,10 @@
 # CSV → MongoDB Loader
 
 Programma Java che carica un file CSV su MongoDB in tre modalità (**TI**, **IA**, **IU**),  
-registra ogni operazione su una collezione di log e rinomina il file dopo il caricamento.
+registra ogni operazione su una collezione di log, crea automaticamente una vista `_RAW`  
+e rinomina il file dopo il caricamento.
 
-Progetto sviluppato come risposta alla specifica fornita da Giulia (email del 21/04/2026).
+Progetto sviluppato come risposta alla specifica fornita da Giulia (email del 17/04/2026).
 
 ---
 
@@ -16,10 +17,11 @@ Progetto sviluppato come risposta alla specifica fornita da Giulia (email del 21
 5. [Come eseguire il caricamento](#5-come-eseguire-il-caricamento)
 6. [Le tre modalità: TI, IA, IU](#6-le-tre-modalit%C3%A0-ti-ia-iu)
 7. [Il timestamp nel nome del file](#7-il-timestamp-nel-nome-del-file)
-8. [I log su MongoDB](#8-i-log-su-mongodb)
-9. [File di test inclusi](#9-file-di-test-inclusi)
-10. [Cosa serve all'orchestratore](#10-cosa-serve-allorchestratore)
-11. [Verifica visiva con Mongo Express](#11-verifica-visiva-con-mongo-express)
+8. [La vista _RAW](#8-la-vista-_raw)
+9. [I log su MongoDB](#9-i-log-su-mongodb)
+10. [File di test inclusi](#10-file-di-test-inclusi)
+11. [Cosa serve all'orchestratore](#11-cosa-serve-allorchestratore)
+12. [Verifica visiva con Mongo Express](#12-verifica-visiva-con-mongo-express)
 
 ---
 
@@ -32,6 +34,7 @@ Ogni volta che viene avviato (dall'orchestratore o manualmente), il programma:
 3. Se il file **esiste** → carica i dati nella collezione MongoDB secondo la modalità scelta (TI / IA / IU)
 4. Scrive un log su MongoDB con `status: SUCCESS` e il numero di righe caricate
 5. **Rinomina** il file aggiungendo un timestamp (es. `dati.csv` → `dati_loaded_20260421183655.csv`)
+6. **Crea (o aggiorna) la vista** `<nomeCollezione>_RAW` che espone tutti i campi della collezione
 
 Alla successiva esecuzione, l'orchestratore cercherà ancora `dati.csv`:  
 non trovandolo (è stato rinominato), il programma registrerà `FILE_NOT_FOUND` e attenderà il prossimo deposito.
@@ -102,7 +105,7 @@ Per spegnere i container:
 docker compose down
 ```
 
-> Se il team di Giulia ha già un'istanza MongoDB, non è necessario Docker:  
+> Se il team ha già un'istanza MongoDB, non è necessario Docker:  
 > basta passare il proprio URI al posto di `mongodb://localhost:27017`.
 
 ---
@@ -114,13 +117,13 @@ docker compose down
 ```
 java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
   <mongoUri> <database> <collezione> <percorsoCSV> \
-  <separatore> <enclosure|NONE> <modo:TI|IA|IU> [chiaveUpsert]
+  <separatore> <enclosure|NONE> <modo:TI|IA|IU> <logCollezione> [chiaveUpsert]
 ```
 
 ### Parametri
 
-| Posizione | Parametro | Esempio | Descrizione |
-|-----------|-----------|---------|-------------|
+| Pos. | Parametro | Esempio | Descrizione |
+|------|-----------|---------|-------------|
 | 1 | mongoUri | `mongodb://localhost:27017` | URI di connessione MongoDB |
 | 2 | database | `mio_database` | Nome del database |
 | 3 | collezione | `mia_collezione` | Nome della collezione di destinazione |
@@ -128,22 +131,23 @@ java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
 | 5 | separatore | `,` oppure `;` | Carattere separatore del CSV |
 | 6 | enclosure | `"` oppure `*` oppure `NONE` | Carattere che racchiude i valori (NONE = assente) |
 | 7 | modo | `TI` / `IA` / `IU` | Modalità di caricamento |
-| 8 | chiaveUpsert | `id_chiave` | Solo per IU: colonna usata come chiave di aggiornamento |
+| 8 | logCollezione | `C_DR_APP_LOG_FILE_CSV` | Nome della collezione di log su MongoDB |
+| 9 | chiaveUpsert | `id_chiave` | Solo per IU: colonna usata come chiave di aggiornamento |
 
 ### Esempi pratici
 
 ```bash
 # TI – separatore virgola, nessun enclosure
 java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 mio_db mia_coll dati.csv , NONE TI
+  mongodb://localhost:27017 mio_db mia_coll dati.csv , NONE TI C_DR_APP_LOG_FILE_CSV
 
 # IA – separatore punto e virgola, enclosure doppio apice
 java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 mio_db mia_coll dati.csv ';' '"' IA
+  mongodb://localhost:27017 mio_db mia_coll dati.csv ';' '"' IA C_DR_APP_LOG_FILE_CSV
 
 # IU – separatore virgola, enclosure asterisco, chiave = codice
 java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 mio_db mia_coll dati.csv , '*' IU codice
+  mongodb://localhost:27017 mio_db mia_coll dati.csv , '*' IU C_DR_APP_LOG_FILE_CSV codice
 ```
 
 ---
@@ -204,14 +208,32 @@ Questo meccanismo garantisce:
 - **Storico**: ogni file caricato viene conservato con il timestamp di caricamento
 - **Sicurezza**: non si perde mai il CSV originale
 
-Se il file ha già un nome con timestamp (es. da un sistema esterno), il comportamento è identico:  
-il programma aggiunge `_loaded_TIMESTAMP` prima dell'estensione `.csv`.
+---
+
+## 8. La vista _RAW
+
+Dopo ogni caricamento riuscito, il programma crea (o ricrea) automaticamente una **vista MongoDB**  
+con il nome della collezione seguito dal suffisso `_RAW`.
+
+Esempio: se carichi su `anagrafica`, verrà creata la vista `anagrafica_RAW`.
+
+La vista espone tutti i campi della collezione senza trasformazioni (`SELECT *`).  
+Serve come layer di accesso standardizzato per i consumer a valle (es. strumenti di BI, query analitiche).
+
+```
+Collezione:  anagrafica          → dati grezzi caricati dal CSV
+Vista:       anagrafica_RAW      → accesso in sola lettura agli stessi dati
+```
+
+> Se la vista esiste già (da un caricamento precedente), viene eliminata e ricreata.  
+> In questo modo riflette sempre la struttura aggiornata della collezione.
 
 ---
 
-## 8. I log su MongoDB
+## 9. I log su MongoDB
 
-Ogni esecuzione scrive un documento nella collezione **`C_DR_APP_LOG_FILE_CSV`**.
+Ogni esecuzione scrive un documento nella collezione specificata come parametro `logCollezione`  
+(convenzionalmente `C_DR_APP_LOG_FILE_CSV`).
 
 ### Struttura del documento di log
 
@@ -237,7 +259,7 @@ Ogni esecuzione scrive un documento nella collezione **`C_DR_APP_LOG_FILE_CSV`**
 
 ---
 
-## 9. File di test inclusi
+## 10. File di test inclusi
 
 Nella root del progetto sono inclusi due file CSV di esempio.
 
@@ -246,16 +268,13 @@ Nella root del progetto sono inclusi due file CSV di esempio.
 ```
 id_chiave,nome,cognome,eta,citta,email
 001,Mario,Rossi,35,Roma,mario.rossi@example.com
-002,Laura,Bianchi,28,Milano,laura.bianchi@example.com
-003,Giuseppe,Verdi,42,Napoli,giuseppe.verdi@example.com
-004,Anna,Ferrari,31,Torino,anna.ferrari@example.com
-005,Marco,Esposito,25,Bologna,marco.esposito@example.com
+...
 ```
 
-**Comando di test:**
+**Comando di test TI:**
 ```bash
 java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 test_db test_coll dati.csv , NONE TI
+  mongodb://localhost:27017 test_db test_coll dati.csv , NONE TI C_DR_APP_LOG_FILE_CSV
 ```
 
 ### `dati_punto_virgola.csv` — separatore `;`, enclosure `"`
@@ -266,21 +285,21 @@ id_chiave;nome;cognome;eta;citta;email
 ...
 ```
 
-**Comando di test:**
+**Comando di test IU:**
 ```bash
 java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 test_db test_coll dati_punto_virgola.csv ';' '"' IU id_chiave
+  mongodb://localhost:27017 test_db test_coll dati_punto_virgola.csv ';' '"' IU C_DR_APP_LOG_FILE_CSV id_chiave
 ```
 
 > **Attenzione:** dopo il primo caricamento il file viene rinominato (es. `dati_loaded_TIMESTAMP.csv`).  
-> Per rieseguire il test, rinominarlo nuovamente in `dati.csv`:
+> Per rieseguire il test, copiarlo nuovamente:
 > ```bash
 > cp dati_loaded_*.csv dati.csv
 > ```
 
 ---
 
-## 10. Cosa serve all'orchestratore
+## 11. Cosa serve all'orchestratore
 
 L'orchestratore deve solamente:
 
@@ -309,7 +328,8 @@ java -jar /opt/loader/csv-mongo-loader-1.0-SNAPSHOT.jar \
   /data/in/anagrafica.csv \
   , \
   NONE \
-  TI
+  TI \
+  C_DR_APP_LOG_FILE_CSV
 ```
 
 ### Parametri da rendere configurabili nell'orchestratore
@@ -323,11 +343,12 @@ java -jar /opt/loader/csv-mongo-loader-1.0-SNAPSHOT.jar \
 | separatore | dipende dal sistema sorgente |
 | enclosure | dipende dal sistema sorgente |
 | modo | TI / IA / IU scelto per ogni flusso |
+| logCollezione | tipicamente fisso: `C_DR_APP_LOG_FILE_CSV` |
 | chiaveUpsert | solo per IU, nome della colonna chiave |
 
 ---
 
-## 11. Verifica visiva con Mongo Express
+## 12. Verifica visiva con Mongo Express
 
 Se hai avviato il Docker Compose incluso, puoi vedere i dati nel browser:
 
@@ -337,6 +358,7 @@ Naviga:
 ```
 Database: test_db
   ├── test_coll               → i documenti caricati dal CSV
+  ├── test_coll_RAW           → la vista automatica (type=view)
   └── C_DR_APP_LOG_FILE_CSV   → tutti i log di esecuzione
 ```
 
