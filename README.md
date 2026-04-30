@@ -1,366 +1,193 @@
-# CSV → MongoDB Loader
+# csv-mongo-loader
 
-Programma Java che carica un file CSV su MongoDB in tre modalità (**TI**, **IA**, **IU**),  
-registra ogni operazione su una collezione di log, crea automaticamente una vista `_RAW`  
-e rinomina il file dopo il caricamento.
-
-Progetto sviluppato come risposta alla specifica fornita da Giulia (email del 17/04/2026).
+Servizio **Spring Boot REST API** per il caricamento di file CSV su **MongoDB**.
+Espone un endpoint HTTP `POST /api/load` invocabile dall'orchestratore o da qualsiasi client HTTP.
+Documentazione interattiva disponibile tramite **Swagger UI**.
 
 ---
 
-## Indice
+## Modalita' di caricamento
 
-1. [Cosa fa il programma](#1-cosa-fa-il-programma)
-2. [Prerequisiti](#2-prerequisiti)
-3. [Come compilare](#3-come-compilare)
-4. [Come avviare MongoDB con Docker](#4-come-avviare-mongodb-con-docker)
-5. [Come eseguire il caricamento](#5-come-eseguire-il-caricamento)
-6. [Le tre modalità: TI, IA, IU](#6-le-tre-modalit%C3%A0-ti-ia-iu)
-7. [Il timestamp nel nome del file](#7-il-timestamp-nel-nome-del-file)
-8. [La vista _RAW](#8-la-vista-_raw)
-9. [I log su MongoDB](#9-i-log-su-mongodb)
-10. [File di test inclusi](#10-file-di-test-inclusi)
-11. [Cosa serve all'orchestratore](#11-cosa-serve-allorchestratore)
-12. [Verifica visiva con Mongo Express](#12-verifica-visiva-con-mongo-express)
+| Codice | Nome | Comportamento |
+|--------|------|---------------|
+| `TI` | Truncate Insert | Svuota la collezione, poi inserisce tutti i record del CSV |
+| `IA` | Insert Append | Inserisce i nuovi record senza toccare quelli esistenti |
+| `IU` | Insert Update (Upsert) | Aggiorna se il record esiste (per chiave), inserisce se nuovo |
+
+Dopo ogni caricamento riuscito il servizio:
+- **rinomina** il file con suffisso `_loaded_yyyyMMddHHmmss.csv` (evita doppi caricamenti)
+- **crea/aggiorna** la vista MongoDB `<collezione>_RAW`
+- **scrive un documento di log** nella collezione configurata
 
 ---
 
-## 1. Cosa fa il programma
+## Stack tecnologico
 
-Ogni volta che viene avviato (dall'orchestratore o manualmente), il programma:
-
-1. **Controlla** se il file CSV indicato esiste nella cartella specificata
-2. Se il file **non esiste** → scrive un log su MongoDB con `status: FILE_NOT_FOUND` e termina
-3. Se il file **esiste** → carica i dati nella collezione MongoDB secondo la modalità scelta (TI / IA / IU)
-4. Scrive un log su MongoDB con `status: SUCCESS` e il numero di righe caricate
-5. **Rinomina** il file aggiungendo un timestamp (es. `dati.csv` → `dati_loaded_20260421183655.csv`)
-6. **Crea (o aggiorna) la vista** `<nomeCollezione>_RAW` che espone tutti i campi della collezione
-
-Alla successiva esecuzione, l'orchestratore cercherà ancora `dati.csv`:  
-non trovandolo (è stato rinominato), il programma registrerà `FILE_NOT_FOUND` e attenderà il prossimo deposito.
+- Java 11
+- Spring Boot 2.7.18 (Tomcat embedded)
+- MongoDB Driver Sync 4.11.1
+- springdoc-openapi-ui 1.7.0 (Swagger)
+- Maven 3.x
 
 ---
 
-## 2. Prerequisiti
-
-| Strumento | Versione minima | Installazione (Ubuntu/WSL) |
-|-----------|----------------|----------------------------|
-| Java JDK  | 11             | `sudo apt install openjdk-11-jdk` |
-| Maven     | 3.x            | `sudo apt install maven` |
-| Docker    | qualsiasi      | [docs.docker.com](https://docs.docker.com/engine/install/) |
-| Docker Compose | v2        | incluso in Docker Desktop |
-
-Verifica dopo l'installazione:
-```bash
-java -version
-mvn -version
-docker --version
-```
-
----
-
-## 3. Come compilare
-
-La compilazione scarica automaticamente il driver MongoDB da internet  
-e impacchetta tutto in un unico file `.jar` eseguibile (detto **fat-jar**).
+## Compilazione
 
 ```bash
-# Clona il repository
-git clone https://github.com/dataappengineer/csv-mongo-loader.git
-cd csv-mongo-loader
-
-# Compila e impacchetta
 mvn clean package
 ```
 
-Al termine troverai il file pronto:
-```
-target/csv-mongo-loader-1.0-SNAPSHOT.jar   (circa 2.3 MB)
-```
-
-> **Nota:** la compilazione richiede connessione internet solo la prima volta.  
-> Le dipendenze vengono salvate nella cache locale di Maven (`~/.m2/`).
+Produce `target/csv-mongo-loader-1.0-SNAPSHOT.jar` (fat-jar autoconsistente).
 
 ---
 
-## 4. Come avviare MongoDB con Docker
-
-Il `docker-compose.yml` incluso avvia due servizi:
-
-| Servizio | Descrizione | Porta |
-|----------|-------------|-------|
-| `csv_mongo` | MongoDB 7 | 27017 |
-| `csv_mongo_express` | Interfaccia web per vedere i dati | 8081 |
+## Avvio del servizio
 
 ```bash
-# Avvia i container in background
-docker compose up -d
-
-# Verifica che siano attivi
-docker compose ps
+java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar
 ```
 
-Per spegnere i container:
-```bash
-docker compose down
-```
-
-> Se il team ha già un'istanza MongoDB, non è necessario Docker:  
-> basta passare il proprio URI al posto di `mongodb://localhost:27017`.
+Il servizio si avvia sulla porta **8080**.
 
 ---
 
-## 5. Come eseguire il caricamento
+## Swagger UI
 
-### Firma del comando
+Apri nel browser:
 
 ```
-java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  <mongoUri> <database> <collezione> <percorsoCSV> \
-  <separatore> <enclosure|NONE> <modo:TI|IA|IU> <logCollezione> [chiaveUpsert]
+http://localhost:8080/swagger-ui/index.html
 ```
 
-### Parametri
+Swagger permette di esplorare l'endpoint, vedere i parametri richiesti e fare chiamate di test direttamente dall'interfaccia grafica.
 
-| Pos. | Parametro | Esempio | Descrizione |
-|------|-----------|---------|-------------|
-| 1 | mongoUri | `mongodb://localhost:27017` | URI di connessione MongoDB |
-| 2 | database | `mio_database` | Nome del database |
-| 3 | collezione | `mia_collezione` | Nome della collezione di destinazione |
-| 4 | percorsoCSV | `/data/dati.csv` | Percorso completo o relativo del file CSV |
-| 5 | separatore | `,` oppure `;` | Carattere separatore del CSV |
-| 6 | enclosure | `"` oppure `*` oppure `NONE` | Carattere che racchiude i valori (NONE = assente) |
-| 7 | modo | `TI` / `IA` / `IU` | Modalità di caricamento |
-| 8 | logCollezione | `C_DR_APP_LOG_FILE_CSV` | Nome della collezione di log su MongoDB |
-| 9 | chiaveUpsert | `id_chiave` | Solo per IU: colonna usata come chiave di aggiornamento |
-
-### Esempi pratici
-
-```bash
-# TI – separatore virgola, nessun enclosure
-java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 mio_db mia_coll dati.csv , NONE TI C_DR_APP_LOG_FILE_CSV
-
-# IA – separatore punto e virgola, enclosure doppio apice
-java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 mio_db mia_coll dati.csv ';' '"' IA C_DR_APP_LOG_FILE_CSV
-
-# IU – separatore virgola, enclosure asterisco, chiave = codice
-java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 mio_db mia_coll dati.csv , '*' IU C_DR_APP_LOG_FILE_CSV codice
+OpenAPI JSON:
+```
+http://localhost:8080/v3/api-docs
 ```
 
 ---
 
-## 6. Le tre modalità: TI, IA, IU
+## Endpoint REST
 
-### TI — Truncate Insert (svuota e reinserisce)
+### `POST /api/load`
 
-- **Cancella tutti** i documenti esistenti nella collezione
-- Inserisce tutte le righe del CSV
-- Usare quando il CSV è una fotografia completa aggiornata dei dati
+Carica un file CSV su MongoDB.
 
-```
-Collezione prima: [A, B, C, D]  (100 documenti vecchi)
-CSV contiene:     [A', B', C']  (3 righe nuove)
-Collezione dopo:  [A', B', C']  (solo i 3 nuovi)
-```
+**Content-Type:** `application/json`
 
-### IA — Insert Append (aggiunge senza cancellare)
-
-- **Non tocca** i documenti già presenti
-- Aggiunge le righe del CSV alla collezione
-- Usare per accumulare dati incrementali
-
-```
-Collezione prima: [A, B, C]  (3 documenti esistenti)
-CSV contiene:     [D, E]     (2 righe nuove)
-Collezione dopo:  [A, B, C, D, E]  (5 documenti totali)
-```
-
-### IU — Insert Update / Upsert (aggiorna o inserisce)
-
-- Per ogni riga del CSV, cerca un documento con la stessa **chiave**
-- Se lo trova → **aggiorna** i campi
-- Se non lo trova → **inserisce** come nuovo documento
-- Richiede il parametro aggiuntivo con il nome della colonna chiave
-
-```
-Collezione prima: [{id:001, nome:"Mario", eta:35}]
-CSV contiene:     [{id:001, nome:"Mario", eta:36}, {id:002, nome:"Laura"}]
-Collezione dopo:  [{id:001, nome:"Mario", eta:36}, {id:002, nome:"Laura"}]
-                   ^--- aggiornato                  ^--- inserito nuovo
-```
-
----
-
-## 7. Il timestamp nel nome del file
-
-Dopo ogni caricamento **riuscito**, il file originale viene rinominato automaticamente  
-aggiungendo la data e l'ora nel formato `yyyyMMddHHmmss`:
-
-```
-dati.csv  →  dati_loaded_20260421183655.csv
-```
-
-Questo meccanismo garantisce:
-- **Idempotenza**: alla successiva esecuzione il programma non trova `dati.csv` → registra `FILE_NOT_FOUND` → non duplica i dati
-- **Storico**: ogni file caricato viene conservato con il timestamp di caricamento
-- **Sicurezza**: non si perde mai il CSV originale
-
----
-
-## 8. La vista _RAW
-
-Dopo ogni caricamento riuscito, il programma crea (o ricrea) automaticamente una **vista MongoDB**  
-con il nome della collezione seguito dal suffisso `_RAW`.
-
-Esempio: se carichi su `anagrafica`, verrà creata la vista `anagrafica_RAW`.
-
-La vista espone tutti i campi della collezione senza trasformazioni (`SELECT *`).  
-Serve come layer di accesso standardizzato per i consumer a valle (es. strumenti di BI, query analitiche).
-
-```
-Collezione:  anagrafica          → dati grezzi caricati dal CSV
-Vista:       anagrafica_RAW      → accesso in sola lettura agli stessi dati
-```
-
-> Se la vista esiste già (da un caricamento precedente), viene eliminata e ricreata.  
-> In questo modo riflette sempre la struttura aggiornata della collezione.
-
----
-
-## 9. I log su MongoDB
-
-Ogni esecuzione scrive un documento nella collezione specificata come parametro `logCollezione`  
-(convenzionalmente `C_DR_APP_LOG_FILE_CSV`).
-
-### Struttura del documento di log
+#### Body della richiesta
 
 ```json
 {
-  "fileName":  "dati.csv",
-  "timestamp": "2026-04-21T18:36:55.123",
-  "status":    "SUCCESS",
-  "records":   5,
-  "type":      "TI",
-  "message":   "..."   // presente solo in caso di errore o FILE_NOT_FOUND
+  "mongoUri":      "mongodb://localhost:27017",
+  "database":      "mio_database",
+  "collezione":    "mia_collezione",
+  "csvPath":       "/percorso/assoluto/dati.csv",
+  "separatore":    ",",
+  "enclosure":     "NONE",
+  "modo":          "TI",
+  "logCollezione": "C_DR_APP_LOG_FILE_CSV"
 }
 ```
 
-### Valori possibili di `status`
-
-| status | Significato |
-|--------|-------------|
-| `SUCCESS` | Caricamento completato con successo |
-| `FILE_NOT_FOUND` | Il file CSV non esisteva nella cartella |
-| `EMPTY_FILE` | Il file esisteva ma non conteneva righe di dati |
-| `ERROR` | Errore imprevisto (dettaglio nel campo `message`) |
-
----
-
-## 10. File di test inclusi
-
-Nella root del progetto sono inclusi due file CSV di esempio.
-
-### `dati.csv` — separatore `,`, nessun enclosure
-
-```
-id_chiave,nome,cognome,eta,citta,email
-001,Mario,Rossi,35,Roma,mario.rossi@example.com
-...
-```
-
-**Comando di test TI:**
-```bash
-java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 test_db test_coll dati.csv , NONE TI C_DR_APP_LOG_FILE_CSV
-```
-
-### `dati_punto_virgola.csv` — separatore `;`, enclosure `"`
-
-```
-id_chiave;nome;cognome;eta;citta;email
-"001";"Mario";"Rossi";"35";"Roma";"mario.rossi@example.com"
-...
-```
-
-**Comando di test IU:**
-```bash
-java -jar target/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://localhost:27017 test_db test_coll dati_punto_virgola.csv ';' '"' IU C_DR_APP_LOG_FILE_CSV id_chiave
-```
-
-> **Attenzione:** dopo il primo caricamento il file viene rinominato (es. `dati_loaded_TIMESTAMP.csv`).  
-> Per rieseguire il test, copiarlo nuovamente:
-> ```bash
-> cp dati_loaded_*.csv dati.csv
+> Per la modalita' **IU** aggiungere il campo:
+> ```json
+> "chiaveUpsert": "nome_campo_chiave"
 > ```
 
+#### Campi del body
+
+| Campo | Tipo | Obbligatorio | Descrizione |
+|-------|------|:---:|-------------|
+| `mongoUri` | string | SI | URI di connessione MongoDB |
+| `database` | string | SI | Nome del database |
+| `collezione` | string | SI | Nome della collezione target |
+| `csvPath` | string | SI | Percorso assoluto del file CSV sul server |
+| `separatore` | string | SI | Carattere separatore (es. `,` oppure `;`) |
+| `enclosure` | string | SI | Delimitatore di testo (es. `"`) oppure `NONE` |
+| `modo` | string | SI | `TI`, `IA` oppure `IU` |
+| `logCollezione` | string | SI | Collezione MongoDB dove scrivere il log |
+| `chiaveUpsert` | string | Solo per IU | Campo usato come chiave per l'upsert |
+
+#### Risposta (HTTP 200)
+
+```json
+{
+  "status":  "SUCCESS",
+  "records": 5,
+  "message": null
+}
+```
+
+| Campo | Valori possibili |
+|-------|------------------|
+| `status` | `SUCCESS`, `FILE_NOT_FOUND`, `EMPTY_FILE`, `ERROR` |
+| `records` | Numero di record elaborati |
+| `message` | Messaggio di errore (null se tutto OK) |
+
+#### Risposta (HTTP 400)
+
+Restituito in caso di parametri mancanti o modalita' non valida:
+
+```json
+{
+  "status":  "ERROR",
+  "records": 0,
+  "message": "Tutti i campi obbligatori devono essere valorizzati: ..."
+}
+```
+
 ---
 
-## 11. Cosa serve all'orchestratore
+## Esempi curl
 
-L'orchestratore deve solamente:
-
-1. **Depositare** il file CSV nella cartella concordata
-2. **Avviare** il programma Java con i parametri corretti
-3. **Leggere l'exit code** (0 = OK, 1 = errore di configurazione)
-
-### File da distribuire
-
-L'unico file necessario in produzione è il **fat-jar**:
-
-```
-target/csv-mongo-loader-1.0-SNAPSHOT.jar
-```
-
-Contiene già al suo interno il driver MongoDB e tutte le dipendenze.  
-**Non serve installare nulla oltre a Java 11+** sul server dove gira l'orchestratore.
-
-### Esempio di chiamata dall'orchestratore
+### TI - Truncate Insert con virgola
 
 ```bash
-java -jar /opt/loader/csv-mongo-loader-1.0-SNAPSHOT.jar \
-  mongodb://mongo-server:27017 \
-  produzione \
-  anagrafica \
-  /data/in/anagrafica.csv \
-  , \
-  NONE \
-  TI \
-  C_DR_APP_LOG_FILE_CSV
+curl -X POST http://localhost:8080/api/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mongoUri":      "mongodb://localhost:27017",
+    "database":      "mydb",
+    "collezione":    "mycoll",
+    "csvPath":       "/data/in/dati.csv",
+    "separatore":    ",",
+    "enclosure":     "NONE",
+    "modo":          "TI",
+    "logCollezione": "C_DR_APP_LOG_FILE_CSV"
+  }'
 ```
 
-### Parametri da rendere configurabili nell'orchestratore
+### IU - Upsert con punto e virgola ed enclosure
 
-| Parametro | Tipicamente variabile tra ambienti |
-|-----------|------------------------------------|
-| mongoUri | diverso tra dev / test / prod |
-| database | diverso tra ambienti |
-| collezione | dipende dal tipo di file |
-| percorsoCSV | cartella di input dell'orchestratore |
-| separatore | dipende dal sistema sorgente |
-| enclosure | dipende dal sistema sorgente |
-| modo | TI / IA / IU scelto per ogni flusso |
-| logCollezione | tipicamente fisso: `C_DR_APP_LOG_FILE_CSV` |
-| chiaveUpsert | solo per IU, nome della colonna chiave |
+```bash
+curl -X POST http://localhost:8080/api/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mongoUri":      "mongodb://localhost:27017",
+    "database":      "mydb",
+    "collezione":    "mycoll",
+    "csvPath":       "/data/in/dati.csv",
+    "separatore":    ";",
+    "enclosure":     "\"",
+    "modo":          "IU",
+    "logCollezione": "C_DR_APP_LOG_FILE_CSV",
+    "chiaveUpsert":  "id_record"
+  }'
+```
 
 ---
 
-## 12. Verifica visiva con Mongo Express
+## Avvio MongoDB con Docker Compose
 
-Se hai avviato il Docker Compose incluso, puoi vedere i dati nel browser:
-
-**http://localhost:8081**
-
-Naviga:
+```bash
+docker compose up -d
 ```
-Database: test_db
-  ├── test_coll               → i documenti caricati dal CSV
-  ├── test_coll_RAW           → la vista automatica (type=view)
-  └── C_DR_APP_LOG_FILE_CSV   → tutti i log di esecuzione
-```
+
+Avvia:
+- **MongoDB 7** su `localhost:27017`
+- **Mongo Express** (UI web) su `http://localhost:8081`
 
 ---
 
@@ -368,25 +195,15 @@ Database: test_db
 
 ```
 csv-mongo-loader/
-├── pom.xml                                    # Dipendenze Maven + configurazione build
-├── docker-compose.yml                         # MongoDB + Mongo Express via Docker
-├── dati.csv                                   # File di test (virgola, no enclosure)
-├── dati_punto_virgola.csv                     # File di test (punto e virgola + enclosure ")
-└── src/
-    └── main/
-        └── java/
-            └── com/example/
-                └── MongoCSVLoader.java        # Codice sorgente principale
-```
-
----
-
-## Dipendenza Maven
-
-```xml
-<dependency>
-    <groupId>org.mongodb</groupId>
-    <artifactId>mongodb-driver-sync</artifactId>
-    <version>4.11.1</version>
-</dependency>
+├── src/main/java/com/example/
+│   ├── CsvMongoLoaderApplication.java   # Entry point Spring Boot
+│   ├── LoadController.java              # @RestController POST /api/load
+│   ├── LoadRequest.java                 # DTO body della richiesta
+│   ├── LoadResponse.java                # DTO risposta JSON
+│   └── MongoCSVLoader.java              # @Service logica di business
+├── src/main/resources/
+│   └── application.properties           # Porta 8080, configurazione
+├── docker-compose.yml                   # MongoDB + Mongo Express
+├── pom.xml                              # Spring Boot 2.7.18 + springdoc
+└── README.md
 ```
