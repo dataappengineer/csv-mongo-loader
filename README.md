@@ -358,10 +358,46 @@ spec:
 
 ### Variabili d'ambiente configurabili
 
-| Variabile | Default | Descrizione |
+In locale i valori di default vengono da `src/main/resources/application.properties`:
+
+```properties
+server.port=8080
+spring.application.name=csv-mongo-loader
+```
+
+In K8s questi stessi valori si sovrascrivono tramite la sezione `env` del container nel `Deployment`.
+Spring Boot legge automaticamente le variabili d'ambiente convertendo `SERVER_PORT` → `server.port`
+e `SPRING_APPLICATION_NAME` → `spring.application.name` (lettere maiuscole, underscore al posto del punto).
+
+```yaml
+containers:
+  - name: csv-mongo-loader
+    image: registry.azienda.it/csv-mongo-loader:1.0
+    ports:
+      - containerPort: 8080
+    env:
+      - name: SERVER_PORT
+        value: "8080"
+      - name: SPRING_APPLICATION_NAME
+        value: "csv-mongo-loader"
+```
+
+Per valori sensibili (es. credenziali MongoDB) si usa un `Secret` invece di `value` diretto:
+
+```yaml
+env:
+  - name: MONGO_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: mongo-credentials
+        key: password
+```
+
+| Variabile | Default (application.properties) | Dove si imposta in K8s |
 |---|---|---|
-| `SERVER_PORT` | `8080` | Porta su cui ascolta il servizio |
-| `SPRING_APPLICATION_NAME` | `csv-mongo-loader` | Nome applicazione nei log |
+| `SERVER_PORT` | `8080` | `env` nel Deployment o ConfigMap |
+| `SPRING_APPLICATION_NAME` | `csv-mongo-loader` | `env` nel Deployment o ConfigMap |
+| credenziali MongoDB | — | `Secret` K8s, referenziato in `env` |
 
 > I parametri `mongoUri`, `database`, `collezione`, `csvPath` ecc. **non** vanno nelle
 > variabili d'ambiente — vengono passati nel body della POST dall'orchestratore ad ogni chiamata.
