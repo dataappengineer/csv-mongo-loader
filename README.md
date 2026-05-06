@@ -6,6 +6,22 @@ Documentazione interattiva disponibile tramite **Swagger UI**.
 
 ---
 
+## Indice
+
+- [Modalita' di caricamento](#modalita-di-caricamento)
+- [Stack tecnologico](#stack-tecnologico)
+- [Compilazione](#compilazione)
+- [Avvio del servizio](#avvio-del-servizio)
+- [Swagger UI](#swagger-ui)
+- [Endpoint REST](#endpoint-rest)
+- [Esempi curl](#esempi-curl)
+- [Avvio MongoDB con Docker Compose](#avvio-mongodb-con-docker-compose)
+- [Build immagine Docker](#build-immagine-docker)
+- [Deploy su Kubernetes](#deploy-su-kubernetes)
+- [Struttura del progetto](#struttura-del-progetto)
+
+---
+
 ## Modalita' di caricamento
 
 | Codice | Nome | Comportamento |
