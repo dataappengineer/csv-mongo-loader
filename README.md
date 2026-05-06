@@ -402,6 +402,45 @@ env:
 > I parametri `mongoUri`, `database`, `collezione`, `csvPath` ecc. **non** vanno nelle
 > variabili d'ambiente — vengono passati nel body della POST dall'orchestratore ad ogni chiamata.
 
+### Autenticazione MongoDB: locale vs collaudo/produzione
+
+Il campo `mongoUri` cambia in base all'ambiente perche' MongoDB puo' girare con o senza autenticazione.
+
+**In locale (Docker Compose)** — MongoDB e' avviato senza credenziali, quindi l'URI non le richiede:
+```json
+"mongoUri": "mongodb://localhost:27017"
+```
+
+Questo funziona perche' il `docker-compose.yml` avvia MongoDB **senza** `MONGO_INITDB_ROOT_USERNAME`
+e `MONGO_INITDB_ROOT_PASSWORD`, lasciandolo aperto.
+
+**In collaudo / produzione K8s** — MongoDB ha autenticazione abilitata, le credenziali vanno nell'URI:
+```json
+"mongoUri": "mongodb://utente_collaudo:password_segreta@mongo-svc:27017/reportistica_sanita"
+```
+
+Il servizio csv-mongo-loader non conosce la password a priori — la riceve nell'URI
+ad ogni chiamata dall'orchestratore, che la recupera dal **K8s Secret**:
+
+```
+K8s Secret (mongo-credentials)
+        │
+        ▼
+Orchestratore legge la password dal Secret
+        │
+        ▼
+Orchestratore costruisce il mongoUri con credenziali
+        │
+        ▼
+POST /api/load  { "mongoUri": "mongodb://user:pass@host/db", ... }
+        │
+        ▼
+csv-mongo-loader si connette a MongoDB con quell'URI
+```
+
+> **Regola di sicurezza**: le credenziali non vanno mai hardcodate nel codice o nel Dockerfile.
+> Vivono solo nel K8s Secret e viaggiano nel body della POST al momento della chiamata.
+
 ### Il problema del csvPath in K8s
 
 Il servizio legge i file CSV da un percorso sul filesystem del pod:
