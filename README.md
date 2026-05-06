@@ -107,6 +107,11 @@ Carica un file CSV su MongoDB.
 }
 ```
 
+> **Valori di `mongoUri` per ambiente:**
+> - Locale (no auth): `"mongodb://localhost:27017"`
+> - K8s (no auth): `"mongodb://mongo-service:27017"`
+> - K8s (con auth): `"mongodb://utente:password@mongo-service:27017/nome_database"`
+
 > Per la modalita' **IU** aggiungere il campo:
 > ```json
 > "chiaveUpsert": "nome_campo_chiave"
@@ -126,8 +131,23 @@ Carica un file CSV su MongoDB.
 | `logCollezione` | string | SI | Collezione MongoDB dove scrivere il log |
 | `chiaveUpsert` | string | Solo per IU | Campo usato come chiave per l'upsert |
 
-#### Risposta (HTTP 200)
+#### Tabella completa delle risposte
 
+| Situazione | HTTP | `status` | `records` | `message` |
+|---|:---:|---|:---:|---|
+| Caricamento riuscito | 200 | `SUCCESS` | n. righe caricate | `null` |
+| File CSV non trovato | 200 | `FILE_NOT_FOUND` | 0 | `null` |
+| File CSV vuoto (solo header) | 200 | `EMPTY_FILE` | 0 | `null` |
+| Errore generico (es. MongoDB non raggiungibile) | 200 | `ERROR` | 0 | testo dell'errore |
+| Campo obbligatorio mancante nel body | 400 | `ERROR` | 0 | elenco campi mancanti |
+| `modo` non valido (es. `XX`) | 400 | `ERROR` | 0 | `"Il campo modo deve essere TI, IA o IU"` |
+| `modo: IU` senza `chiaveUpsert` | 400 | `ERROR` | 0 | `"Il campo chiaveUpsert e' obbligatorio..."` |
+
+> **Regola rapida:**
+> - **HTTP 400** → problema nel body della richiesta (colpa di chi chiama)
+> - **HTTP 200** → il servizio ha ricevuto la chiamata e risponde sempre, anche in caso di errore di business (file non trovato, MongoDB KO)
+
+Esempio risposta successo:
 ```json
 {
   "status":  "SUCCESS",
@@ -136,16 +156,7 @@ Carica un file CSV su MongoDB.
 }
 ```
 
-| Campo | Valori possibili |
-|-------|------------------|
-| `status` | `SUCCESS`, `FILE_NOT_FOUND`, `EMPTY_FILE`, `ERROR` |
-| `records` | Numero di record elaborati |
-| `message` | Messaggio di errore (null se tutto OK) |
-
-#### Risposta (HTTP 400)
-
-Restituito in caso di parametri mancanti o modalita' non valida:
-
+Esempio risposta errore validazione (HTTP 400):
 ```json
 {
   "status":  "ERROR",
