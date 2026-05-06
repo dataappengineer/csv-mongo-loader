@@ -177,6 +177,58 @@ curl -X POST http://localhost:8080/api/load \
   }'
 ```
 
+### TI - Test collaudo (risposta SUCCESS)
+
+```bash
+curl -s -X POST http://localhost:8080/api/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mongoUri":      "mongodb://localhost:27017",
+    "database":      "collaudo_db",
+    "collezione":    "test_collaudo",
+    "csvPath":       "/tmp/test_collaudo.csv",
+    "separatore":    ",",
+    "enclosure":     "NONE",
+    "modo":          "TI",
+    "logCollezione": "C_DR_APP_LOG_FILE_CSV"
+  }'
+```
+
+Risposta attesa:
+```json
+{
+    "status": "SUCCESS",
+    "records": 3,
+    "message": null
+}
+```
+
+### TI - File inesistente (risposta FILE_NOT_FOUND)
+
+```bash
+curl -s -X POST http://localhost:8080/api/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mongoUri":      "mongodb://localhost:27017",
+    "database":      "collaudo_db",
+    "collezione":    "test_collaudo",
+    "csvPath":       "/tmp/file_inesistente.csv",
+    "separatore":    ",",
+    "enclosure":     "NONE",
+    "modo":          "TI",
+    "logCollezione": "C_DR_APP_LOG_FILE_CSV"
+  }'
+```
+
+Risposta attesa:
+```json
+{
+    "status": "FILE_NOT_FOUND",
+    "records": 0,
+    "message": "File non trovato: /tmp/file_inesistente.csv"
+}
+```
+
 ---
 
 ## Avvio MongoDB con Docker Compose
