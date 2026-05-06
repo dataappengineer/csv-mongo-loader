@@ -243,6 +243,173 @@ Avvia:
 
 ---
 
+## Build immagine Docker
+
+### Prerequisiti
+
+- Docker installato
+- JAR compilato in `target/` (eseguire `mvn clean package` se necessario)
+
+### Dockerfile
+
+Il `Dockerfile` nella root del progetto usa `eclipse-temurin:11-jre-alpine` come base (~85 MB):
+
+```dockerfile
+FROM eclipse-temurin:11-jre-alpine
+WORKDIR /app
+COPY target/csv-mongo-loader-1.0-SNAPSHOT.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+### Build e test locale
+
+```bash
+# 1. Compila il JAR (se non e' gia' presente)
+mvn clean package
+
+# 2. Build dell'immagine Docker
+docker build -t csv-mongo-loader:1.0 .
+
+# 3. Verifica che l'immagine sia stata creata
+docker images | grep csv-mongo-loader
+
+# 4. Avvia il container in test locale
+docker run -d --name csv-loader-test -p 8082:8080 csv-mongo-loader:1.0
+
+# 5. Verifica che il servizio sia up
+curl -s http://localhost:8082/swagger-ui/index.html | grep -o '<title>[^<]*</title>'
+
+# 6. Cleanup
+docker stop csv-loader-test && docker rm csv-loader-test
+```
+
+> **Nota**: in test locale il container non raggiunge MongoDB su `localhost:27017` perche'
+> il networking e' isolato. In K8s il `mongoUri` punta al Service di MongoDB nel cluster.
+
+### Push su registry aziendale
+
+```bash
+# Tag con il registry aziendale
+docker tag csv-mongo-loader:1.0 registry.azienda.it/csv-mongo-loader:1.0
+
+# Push
+docker push registry.azienda.it/csv-mongo-loader:1.0
+```
+
+---
+
+## Deploy su Kubernetes
+
+### Oggetti K8s necessari
+
+| Oggetto | Scopo |
+|---|---|
+| `Deployment` | Gestisce il pod con il container csv-mongo-loader |
+| `Service` | Espone il pod sulla rete del cluster |
+| `ConfigMap` | Configurazioni non sensibili (porta, nome app) |
+| `Secret` | Credenziali MongoDB (se con autenticazione) |
+| `PersistentVolumeClaim` | Montaggio directory CSV sul pod |
+
+### Deployment manifest di esempio
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csv-mongo-loader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csv-mongo-loader
+  template:
+    metadata:
+      labels:
+        app: csv-mongo-loader
+    spec:
+      containers:
+        - name: csv-mongo-loader
+          image: registry.azienda.it/csv-mongo-loader:1.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SERVER_PORT
+              value: "8080"
+          volumeMounts:
+            - name: csv-volume
+              mountPath: /data/in
+      volumes:
+        - name: csv-volume
+          persistentVolumeClaim:
+            claimName: csv-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csv-loader-svc
+spec:
+  selector:
+    app: csv-mongo-loader
+  ports:
+    - port: 8080
+      targetPort: 8080
+```
+
+### Variabili d'ambiente configurabili
+
+| Variabile | Default | Descrizione |
+|---|---|---|
+| `SERVER_PORT` | `8080` | Porta su cui ascolta il servizio |
+| `SPRING_APPLICATION_NAME` | `csv-mongo-loader` | Nome applicazione nei log |
+
+> I parametri `mongoUri`, `database`, `collezione`, `csvPath` ecc. **non** vanno nelle
+> variabili d'ambiente — vengono passati nel body della POST dall'orchestratore ad ogni chiamata.
+
+### Il problema del csvPath in K8s
+
+Il servizio legge i file CSV da un percorso sul filesystem del pod:
+```json
+"csvPath": "/data/in/anagrafica.csv"
+```
+
+Il filesystem del container e' **effimero** (si cancella al restart). Soluzioni:
+
+| Soluzione | Quando usarla |
+|---|---|
+| **PersistentVolumeClaim (PVC)** | Il file viene depositato su storage condiviso (NFS, cloud storage) |
+| **Init Container** | Un container iniziale scarica il file prima che parta il servizio |
+| **Shared Volume tra pod** | L'orchestratore e il loader condividono lo stesso volume |
+
+### Comandi kubectl essenziali
+
+```bash
+# Applica il deployment
+kubectl apply -f deployment.yaml
+
+# Controlla lo stato dei pod
+kubectl get pods -l app=csv-mongo-loader
+
+# Leggi i log del pod
+kubectl logs -l app=csv-mongo-loader --tail=50
+
+# Verifica il service
+kubectl get svc csv-loader-svc
+
+# Aggiorna a una nuova versione dell'immagine
+kubectl set image deployment/csv-mongo-loader csv-mongo-loader=registry.azienda.it/csv-mongo-loader:1.1
+```
+
+### URL del servizio dentro il cluster
+
+| Risorsa | URL |
+|---|---|
+| API endpoint | `http://csv-loader-svc:8080/api/load` |
+| Swagger UI | `http://csv-loader-svc:8080/swagger-ui/index.html` |
+| OpenAPI JSON | `http://csv-loader-svc:8080/v3/api-docs` |
+
+---
+
 ## Struttura del progetto
 
 ```
@@ -255,7 +422,8 @@ csv-mongo-loader/
 │   └── MongoCSVLoader.java              # @Service logica di business
 ├── src/main/resources/
 │   └── application.properties           # Porta 8080, configurazione
-├── docker-compose.yml                   # MongoDB + Mongo Express
+├── Dockerfile                           # Build immagine Docker
+├── docker-compose.yml                   # MongoDB + Mongo Express (sviluppo locale)
 ├── pom.xml                              # Spring Boot 2.7.18 + springdoc
 └── README.md
 ```
