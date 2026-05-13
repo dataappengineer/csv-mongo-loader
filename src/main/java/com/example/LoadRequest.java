@@ -1,6 +1,7 @@
 package com.example;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import java.util.List;
 
 @Schema(description = "Parametri per il caricamento del file CSV su MongoDB")
 public class LoadRequest {
@@ -32,6 +33,12 @@ public class LoadRequest {
     @Schema(description = "Campo chiave per la modalita' IU (upsert). Obbligatorio solo se modo=IU", example = "id_chiave")
     private String chiaveUpsert;
 
+    @Schema(description = "Numero di record per batch (default 1000). Opzionale.", example = "1000")
+    private Integer batchSize;
+
+    @Schema(description = "Lista di nomi colonne da mascherare con SHA-512. Opzionale.", example = "[\"codice_fiscale\", \"cognome\"]")
+    private List<String> colonneHash;
+
     public String getMongoUri() { return mongoUri; }
     public void setMongoUri(String v) { this.mongoUri = v; }
 
@@ -58,4 +65,10 @@ public class LoadRequest {
 
     public String getChiaveUpsert() { return chiaveUpsert; }
     public void setChiaveUpsert(String v) { this.chiaveUpsert = v; }
+
+    public Integer getBatchSize() { return batchSize; }
+    public void setBatchSize(Integer v) { this.batchSize = v; }
+
+    public List<String> getColonneHash() { return colonneHash; }
+    public void setColonneHash(List<String> v) { this.colonneHash = v; }
 }

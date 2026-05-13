@@ -35,6 +35,9 @@ Dopo ogni caricamento riuscito il servizio:
 - **crea/aggiorna** la vista MongoDB `<collezione>_RAW`
 - **scrive un documento di log** nella collezione configurata
 
+Il caricamento avviene in **streaming per batch** (`batchSize` righe alla volta) per gestire file di grandi dimensioni senza esaurire la memoria.
+Le colonne sensibili possono essere **mascherate con SHA-512** prima dell'inserimento tramite il parametro `colonneHash`.
+
 ---
 
 ## Stack tecnologico
@@ -103,7 +106,9 @@ Carica un file CSV su MongoDB.
   "separatore":    ",",
   "enclosure":     "NONE",
   "modo":          "TI",
-  "logCollezione": "C_DR_APP_LOG_FILE_CSV"
+  "logCollezione": "C_DR_APP_LOG_FILE_CSV",
+  "batchSize":     1000,
+  "colonneHash":   ["codice_fiscale", "cognome"]
 }
 ```
 
@@ -130,6 +135,8 @@ Carica un file CSV su MongoDB.
 | `modo` | string | SI | `TI`, `IA` oppure `IU` |
 | `logCollezione` | string | SI | Collezione MongoDB dove scrivere il log |
 | `chiaveUpsert` | string | Solo per IU | Campo usato come chiave per l'upsert |
+| `batchSize` | integer | NO | Numero di righe per batch (default: `1000`). Controlla l'uso della RAM |
+| `colonneHash` | array di string | NO | Nomi delle colonne da mascherare con SHA-512 prima dell'inserimento |
 
 #### Tabella completa delle risposte
 
@@ -165,6 +172,24 @@ Esempio risposta errore validazione (HTTP 400):
 }
 ```
 
+#### Caricamento in streaming (batchSize)
+
+Il servizio legge il file CSV **una riga alla volta** (streaming) e inserisce su MongoDB a blocchi di `batchSize` righe, senza mai caricare l'intero file in RAM. Questo permette di gestire file di centinaia di MB senza `OutOfMemoryError`.
+
+- Se `batchSize` non e' specificato, il default e' **1000** righe per batch.
+- La strategia di streaming si applica a tutte le modalita' (`TI`, `IA`, `IU`).
+- Una sola richiesta HTTP gestisce l'intero file: il caller non deve inviare piu' chiamate.
+
+#### Mascheramento dati sensibili (colonneHash)
+
+Le colonne elencate in `colonneHash` vengono sottoposte a hashing **SHA-512** prima dell'inserimento su MongoDB. Il valore originale non viene mai scritto nel database.
+
+- SHA-512 e' irreversibile: dal valore hashato non e' possibile risalire all'originale.
+- I valori vuoti non vengono hashati.
+- Le colonne non presenti in `colonneHash` vengono scritte in chiaro.
+
+Esempio: `"codice_fiscale": "RSSMRA80A01H501U"` diventa `"codice_fiscale": "3d5f8b2a...e9c1"` (128 caratteri esadecimali).
+
 ---
 
 ## Esempi curl
@@ -182,7 +207,27 @@ curl -X POST http://localhost:8080/api/load \
     "separatore":    ",",
     "enclosure":     "NONE",
     "modo":          "TI",
-    "logCollezione": "C_DR_APP_LOG_FILE_CSV"
+    "logCollezione": "C_DR_APP_LOG_FILE_CSV",
+    "batchSize":     1000
+  }'
+```
+
+### TI - Con mascheramento SHA-512 su colonne sensibili
+
+```bash
+curl -X POST http://localhost:8080/api/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mongoUri":      "mongodb://localhost:27017",
+    "database":      "sanita_db",
+    "collezione":    "pazienti",
+    "csvPath":       "/data/in/pazienti.csv",
+    "separatore":    ",",
+    "enclosure":     "NONE",
+    "modo":          "TI",
+    "logCollezione": "C_DR_APP_LOG_FILE_CSV",
+    "batchSize":     1000,
+    "colonneHash":   ["codice_fiscale", "cognome", "data_nascita"]
   }'
 ```
 

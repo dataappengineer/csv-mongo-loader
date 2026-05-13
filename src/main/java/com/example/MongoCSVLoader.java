@@ -6,6 +6,9 @@ import org.bson.Document;
 import org.springframework.stereotype.Service;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -24,13 +27,21 @@ public class MongoCSVLoader {
     private static final DateTimeFormatter TS_FMT =
             DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
+    private static final int DEFAULT_BATCH_SIZE = 1000;
+
     /**
      * Esegue il caricamento del file CSV su MongoDB secondo i parametri ricevuti.
+     * Legge il file in streaming per batch di batchSize righe per evitare OutOfMemoryError.
+     * Le colonne in colonneHash vengono mascherate con SHA-512 prima dell'inserimento.
      */
     public LoadResponse load(LoadRequest req) {
         String enclosure = "NONE".equalsIgnoreCase(req.getEnclosure()) ? "" : req.getEnclosure();
         String mode = req.getModo().toUpperCase();
         String updateKey = req.getChiaveUpsert();
+        int batchSize = (req.getBatchSize() != null && req.getBatchSize() > 0)
+                ? req.getBatchSize() : DEFAULT_BATCH_SIZE;
+        List<String> colonneHash = req.getColonneHash() != null
+                ? req.getColonneHash() : Collections.emptyList();
 
         try (MongoClient mongoClient = MongoClients.create(req.getMongoUri())) {
             MongoDatabase db = mongoClient.getDatabase(req.getDatabase());
@@ -52,38 +63,17 @@ public class MongoCSVLoader {
             int    count    = 0;
 
             try {
-                List<Document> rows = parseCSV(csvFile, req.getSeparatore(), enclosure);
-                count = rows.size();
+                // TI: svuota la collezione prima di iniziare lo streaming
+                if ("TI".equals(mode)) {
+                    coll.deleteMany(new Document());
+                }
 
-                if (rows.isEmpty()) {
+                count = streamCSV(csvFile, req.getSeparatore(), enclosure,
+                        batchSize, colonneHash, mode, updateKey, coll);
+
+                if (count == 0) {
                     status = "EMPTY_FILE";
                 } else {
-                    switch (mode) {
-                        case "TI":
-                            coll.deleteMany(new Document());
-                            coll.insertMany(rows);
-                            break;
-
-                        case "IA":
-                            coll.insertMany(rows);
-                            break;
-
-                        case "IU":
-                            List<WriteModel<Document>> ops = new ArrayList<>();
-                            UpdateOptions opt = new UpdateOptions().upsert(true);
-                            for (Document d : rows) {
-                                ops.add(new UpdateOneModel<>(
-                                        new Document(updateKey, d.get(updateKey)),
-                                        new Document("$set", d),
-                                        opt));
-                            }
-                            coll.bulkWrite(ops);
-                            break;
-
-                        default:
-                            throw new IllegalArgumentException(
-                                    "Modalita' sconosciuta: '" + mode + "'. Usa TI, IA o IU.");
-                    }
                     renameFile(csvFile);
                     createRawView(db, req.getCollezione());
                 }
@@ -98,30 +88,92 @@ public class MongoCSVLoader {
         }
     }
 
-    // ── Parsing CSV ─────────────────────────────────────────────────────────
+    // ── Streaming CSV con batch ──────────────────────────────────────────────
 
-    private List<Document> parseCSV(File file, String separator, String enclosure)
-            throws IOException {
-        List<Document> docs = new ArrayList<>();
+    private int streamCSV(File file, String separator, String enclosure,
+                          int batchSize, List<String> colonneHash,
+                          String mode, String updateKey,
+                          MongoCollection<Document> coll) throws IOException {
+        int total = 0;
         try (BufferedReader br = new BufferedReader(
                 new InputStreamReader(new FileInputStream(file), "UTF-8"))) {
 
             String headerLine = br.readLine();
-            if (headerLine == null) return docs;
+            if (headerLine == null) return 0;
 
             String[] headers = splitLine(headerLine, separator, enclosure);
+            List<Document> batch = new ArrayList<>(batchSize);
             String line;
+
             while ((line = br.readLine()) != null) {
                 if (line.isBlank()) continue;
                 String[] values = splitLine(line, separator, enclosure);
                 Document d = new Document();
                 for (int i = 0; i < headers.length; i++) {
-                    d.append(headers[i].trim(), i < values.length ? values[i] : "");
+                    String colName = headers[i].trim();
+                    String val = i < values.length ? values[i] : "";
+                    if (!val.isEmpty() && colonneHash.contains(colName)) {
+                        val = sha512(val);
+                    }
+                    d.append(colName, val);
                 }
-                docs.add(d);
+                batch.add(d);
+
+                if (batch.size() >= batchSize) {
+                    flushBatch(batch, mode, updateKey, coll);
+                    total += batch.size();
+                    batch.clear();
+                }
+            }
+
+            // ultimo batch parziale
+            if (!batch.isEmpty()) {
+                flushBatch(batch, mode, updateKey, coll);
+                total += batch.size();
+                batch.clear();
             }
         }
-        return docs;
+        return total;
+    }
+
+    private void flushBatch(List<Document> batch, String mode, String updateKey,
+                            MongoCollection<Document> coll) {
+        switch (mode) {
+            case "TI":
+            case "IA":
+                coll.insertMany(batch);
+                break;
+            case "IU":
+                List<WriteModel<Document>> ops = new ArrayList<>(batch.size());
+                UpdateOptions opt = new UpdateOptions().upsert(true);
+                for (Document d : batch) {
+                    ops.add(new UpdateOneModel<>(
+                            new Document(updateKey, d.get(updateKey)),
+                            new Document("$set", d),
+                            opt));
+                }
+                coll.bulkWrite(ops);
+                break;
+            default:
+                throw new IllegalArgumentException(
+                        "Modalita' sconosciuta: '" + mode + "'. Usa TI, IA o IU.");
+        }
+    }
+
+    // ── SHA-512 ──────────────────────────────────────────────────────────────
+
+    private String sha512(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-512");
+            byte[] hash = md.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(128);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-512 non disponibile", e);
+        }
     }
 
     private String[] splitLine(String line, String separator, String enclosure) {
