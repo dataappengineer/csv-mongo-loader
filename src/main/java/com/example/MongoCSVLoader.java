@@ -179,21 +179,50 @@ public class MongoCSVLoader {
         }
     }
 
+    /**
+     * Parsing RFC 4180: riconosce l'enclosure e tratta il separatore come
+     * delimitatore di campo SOLO quando non si trova all'interno di un campo
+     * delimitato. Gestisce anche le virgolette doppie escapate ("").
+     */
     private String[] splitLine(String line, String separator, String enclosure) {
-        String[] parts = line.split(Pattern.quote(separator), -1);
-        if (enclosure == null || enclosure.isEmpty()) return parts;
-
-        String[] result = new String[parts.length];
-        for (int i = 0; i < parts.length; i++) {
-            String p = parts[i].trim();
-            if (p.length() >= 2 * enclosure.length()
-                    && p.startsWith(enclosure)
-                    && p.endsWith(enclosure)) {
-                p = p.substring(enclosure.length(), p.length() - enclosure.length());
-            }
-            result[i] = p;
+        // Fast path: nessun enclosure, split diretto
+        if (enclosure == null || enclosure.isEmpty()) {
+            return line.split(Pattern.quote(separator), -1);
         }
-        return result;
+
+        char sep = separator.charAt(0);
+        char enc = enclosure.charAt(0);
+        List<String> fields = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (inQuotes) {
+                if (c == enc) {
+                    // virgoletta doppia escapata: "" → un singolo "
+                    if (i + 1 < line.length() && line.charAt(i + 1) == enc) {
+                        current.append(enc);
+                        i++;
+                    } else {
+                        inQuotes = false; // fine campo delimitato
+                    }
+                } else {
+                    current.append(c);
+                }
+            } else {
+                if (c == enc) {
+                    inQuotes = true; // inizio campo delimitato
+                } else if (c == sep) {
+                    fields.add(current.toString());
+                    current.setLength(0);
+                } else {
+                    current.append(c);
+                }
+            }
+        }
+        fields.add(current.toString()); // ultimo campo
+        return fields.toArray(new String[0]);
     }
 
     // ── Rename file ──────────────────────────────────────────────────────────
