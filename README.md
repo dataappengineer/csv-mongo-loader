@@ -32,7 +32,7 @@ Documentazione interattiva disponibile tramite **Swagger UI**.
 
 Dopo ogni caricamento riuscito il servizio:
 - **rinomina** il file con suffisso `_loaded_yyyyMMddHHmmss.csv` (evita doppi caricamenti)
-- **crea/aggiorna** la vista MongoDB `<collezione>_RAW`
+- **crea/aggiorna** la vista MongoDB con il nome indicato nel parametro `nomeVista` (default: `<collezione>_RAW`)
 - **scrive un documento di log** nella collezione configurata
 
 Il caricamento avviene in **streaming per batch** (`batchSize` righe alla volta) per gestire file di grandi dimensioni senza esaurire la memoria.
@@ -108,7 +108,8 @@ Carica un file CSV su MongoDB.
   "modo":          "TI",
   "logCollezione": "C_DR_APP_LOG_FILE_CSV",
   "batchSize":     1000,
-  "colonneHash":   ["codice_fiscale", "cognome"]
+  "colonneHash":   ["codice_fiscale", "cognome"],
+  "nomeVista":     "mia_collezione_RAW"
 }
 ```
 
@@ -137,6 +138,7 @@ Carica un file CSV su MongoDB.
 | `chiaveUpsert` | string | Solo per IU | Campo usato come chiave per l'upsert |
 | `batchSize` | integer | NO | Numero di righe per batch (default: `1000`). Controlla l'uso della RAM |
 | `colonneHash` | array di string | NO | Nomi delle colonne da mascherare con SHA-512 prima dell'inserimento |
+| `nomeVista` | string | NO | Nome della vista MongoDB da creare dopo il caricamento (default: `<collezione>_RAW`) |
 
 #### Tabella completa delle risposte
 
@@ -227,7 +229,8 @@ curl -X POST http://localhost:8080/api/load \
     "modo":          "TI",
     "logCollezione": "C_DR_APP_LOG_FILE_CSV",
     "batchSize":     1000,
-    "colonneHash":   ["codice_fiscale", "cognome", "data_nascita"]
+    "colonneHash":   ["codice_fiscale", "cognome", "data_nascita"],
+    "nomeVista":     "pazienti_RAW"
   }'
 ```
 

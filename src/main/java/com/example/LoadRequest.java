@@ -39,6 +39,9 @@ public class LoadRequest {
     @Schema(description = "Lista di nomi colonne da mascherare con SHA-512. Opzionale.", example = "[\"codice_fiscale\", \"cognome\"]")
     private List<String> colonneHash;
 
+    @Schema(description = "Nome della vista MongoDB da creare dopo il caricamento. Se assente viene usato <collezione>_RAW.", example = "mia_vista_RAW")
+    private String nomeVista;
+
     public String getMongoUri() { return mongoUri; }
     public void setMongoUri(String v) { this.mongoUri = v; }
 
@@ -71,4 +74,7 @@ public class LoadRequest {
 
     public List<String> getColonneHash() { return colonneHash; }
     public void setColonneHash(List<String> v) { this.colonneHash = v; }
+
+    public String getNomeVista() { return nomeVista; }
+    public void setNomeVista(String v) { this.nomeVista = v; }
 }

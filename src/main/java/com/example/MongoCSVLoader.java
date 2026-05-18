@@ -75,7 +75,10 @@ public class MongoCSVLoader {
                     status = "EMPTY_FILE";
                 } else {
                     renameFile(csvFile);
-                    createRawView(db, req.getCollezione());
+                    String viewName = (req.getNomeVista() != null && !req.getNomeVista().isBlank())
+                            ? req.getNomeVista()
+                            : req.getCollezione() + "_RAW";
+                    createRawView(db, req.getCollezione(), viewName);
                 }
             } catch (Exception e) {
                 status   = "ERROR";
@@ -206,8 +209,7 @@ public class MongoCSVLoader {
 
     // ── Vista _RAW ───────────────────────────────────────────────────────────
 
-    private void createRawView(MongoDatabase db, String collName) {
-        String viewName = collName + "_RAW";
+    private void createRawView(MongoDatabase db, String collName, String viewName) {
         try { db.getCollection(viewName).drop(); } catch (Exception ignored) { }
         db.createView(viewName, collName, Collections.emptyList());
     }
