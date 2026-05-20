@@ -42,6 +42,18 @@ public class LoadRequest {
     @Schema(description = "Nome della vista MongoDB da creare dopo il caricamento. Se assente viene usato <collezione>_RAW.", example = "mia_vista_RAW")
     private String nomeVista;
 
+    @Schema(description = "Identificativo job fornito dal chiamante. Opzionale, restituito nel body 202 e nel callback.", example = "id57")
+    private String jobId;
+
+    @Schema(description = "URL di callback. Se valorizzato il servizio risponde 202 immediatamente e notifica il risultato via POST al termine. Opzionale.", example = "https://be.eka.it/api/callback")
+    private String callbackUrl;
+
+    @Schema(description = "Username Basic Auth per il callback. Obbligatorio se callbackUrl e' valorizzato.", example = "user")
+    private String callbackUser;
+
+    @Schema(description = "Password Basic Auth per il callback. Obbligatoria se callbackUrl e' valorizzato.", example = "secret")
+    private String callbackPassword;
+
     public String getMongoUri() { return mongoUri; }
     public void setMongoUri(String v) { this.mongoUri = v; }
 
@@ -77,4 +89,16 @@ public class LoadRequest {
 
     public String getNomeVista() { return nomeVista; }
     public void setNomeVista(String v) { this.nomeVista = v; }
+
+    public String getJobId() { return jobId; }
+    public void setJobId(String v) { this.jobId = v; }
+
+    public String getCallbackUrl() { return callbackUrl; }
+    public void setCallbackUrl(String v) { this.callbackUrl = v; }
+
+    public String getCallbackUser() { return callbackUser; }
+    public void setCallbackUser(String v) { this.callbackUser = v; }
+
+    public String getCallbackPassword() { return callbackPassword; }
+    public void setCallbackPassword(String v) { this.callbackPassword = v; }
 }
