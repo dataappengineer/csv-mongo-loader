@@ -37,7 +37,8 @@ public class MongoCSVLoader {
     public LoadResponse load(LoadRequest req) {
         String enclosure = "NONE".equalsIgnoreCase(req.getEnclosure()) ? "" : req.getEnclosure();
         String mode = req.getModo().toUpperCase();
-        String updateKey = req.getChiaveUpsert();
+        List<String> updateKeys = req.getChiaveUpsert() != null
+                ? req.getChiaveUpsert() : Collections.emptyList();
         int batchSize = (req.getBatchSize() != null && req.getBatchSize() > 0)
                 ? req.getBatchSize() : DEFAULT_BATCH_SIZE;
         List<String> colonneHash = req.getColonneHash() != null
@@ -69,7 +70,7 @@ public class MongoCSVLoader {
                 }
 
                 count = streamCSV(csvFile, req.getSeparatore(), enclosure,
-                        batchSize, colonneHash, mode, updateKey, coll);
+                        batchSize, colonneHash, mode, updateKeys, coll);
 
                 if (count == 0) {
                     status = "EMPTY_FILE";
@@ -95,7 +96,7 @@ public class MongoCSVLoader {
 
     private int streamCSV(File file, String separator, String enclosure,
                           int batchSize, List<String> colonneHash,
-                          String mode, String updateKey,
+                          String mode, List<String> updateKeys,
                           MongoCollection<Document> coll) throws IOException {
         int total = 0;
         try (BufferedReader br = new BufferedReader(
@@ -123,7 +124,7 @@ public class MongoCSVLoader {
                 batch.add(d);
 
                 if (batch.size() >= batchSize) {
-                    flushBatch(batch, mode, updateKey, coll);
+                    flushBatch(batch, mode, updateKeys, coll);
                     total += batch.size();
                     batch.clear();
                 }
@@ -131,7 +132,7 @@ public class MongoCSVLoader {
 
             // ultimo batch parziale
             if (!batch.isEmpty()) {
-                flushBatch(batch, mode, updateKey, coll);
+                flushBatch(batch, mode, updateKeys, coll);
                 total += batch.size();
                 batch.clear();
             }
@@ -139,7 +140,7 @@ public class MongoCSVLoader {
         return total;
     }
 
-    private void flushBatch(List<Document> batch, String mode, String updateKey,
+    private void flushBatch(List<Document> batch, String mode, List<String> updateKeys,
                             MongoCollection<Document> coll) {
         switch (mode) {
             case "TI":
@@ -150,10 +151,11 @@ public class MongoCSVLoader {
                 List<WriteModel<Document>> ops = new ArrayList<>(batch.size());
                 UpdateOptions opt = new UpdateOptions().upsert(true);
                 for (Document d : batch) {
-                    ops.add(new UpdateOneModel<>(
-                            new Document(updateKey, d.get(updateKey)),
-                            new Document("$set", d),
-                            opt));
+                    Document filter = new Document();
+                    for (String key : updateKeys) {
+                        filter.append(key, d.get(key));
+                    }
+                    ops.add(new UpdateOneModel<>(filter, new Document("$set", d), opt));
                 }
                 coll.bulkWrite(ops);
                 break;

@@ -51,7 +51,7 @@ public class LoadController {
             return ResponseEntity.badRequest()
                     .body(new LoadResponse("ERROR", 0, "Il campo modo deve essere TI, IA o IU"));
         }
-        if (modo.equals("IU") && isBlank(request.getChiaveUpsert())) {
+        if (modo.equals("IU") && (request.getChiaveUpsert() == null || request.getChiaveUpsert().isEmpty())) {
             return ResponseEntity.badRequest()
                     .body(new LoadResponse("ERROR", 0,
                             "Il campo chiaveUpsert e' obbligatorio per la modalita' IU"));

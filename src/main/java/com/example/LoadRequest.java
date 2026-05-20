@@ -30,8 +30,8 @@ public class LoadRequest {
     @Schema(description = "Nome della collezione di log", example = "C_DR_APP_LOG_FILE_CSV")
     private String logCollezione;
 
-    @Schema(description = "Campo chiave per la modalita' IU (upsert). Obbligatorio solo se modo=IU", example = "id_chiave")
-    private String chiaveUpsert;
+    @Schema(description = "Campi chiave per la modalita' IU (upsert). Supporta chiave composta da piu' campi. Obbligatorio solo se modo=IU", example = "[\"id_chiave\"]")
+    private List<String> chiaveUpsert;
 
     @Schema(description = "Numero di record per batch (default 1000). Opzionale.", example = "1000")
     private Integer batchSize;
@@ -66,8 +66,8 @@ public class LoadRequest {
     public String getLogCollezione() { return logCollezione; }
     public void setLogCollezione(String v) { this.logCollezione = v; }
 
-    public String getChiaveUpsert() { return chiaveUpsert; }
-    public void setChiaveUpsert(String v) { this.chiaveUpsert = v; }
+    public List<String> getChiaveUpsert() { return chiaveUpsert; }
+    public void setChiaveUpsert(List<String> v) { this.chiaveUpsert = v; }
 
     public Integer getBatchSize() { return batchSize; }
     public void setBatchSize(Integer v) { this.batchSize = v; }

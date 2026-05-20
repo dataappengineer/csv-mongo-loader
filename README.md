@@ -120,7 +120,11 @@ Carica un file CSV su MongoDB.
 
 > Per la modalita' **IU** aggiungere il campo:
 > ```json
-> "chiaveUpsert": "nome_campo_chiave"
+> "chiaveUpsert": ["nome_campo_chiave"]
+> ```
+> Per chiave composta da piu' campi:
+> ```json
+> "chiaveUpsert": ["campo1", "campo2"]
 > ```
 
 #### Campi del body
@@ -135,7 +139,7 @@ Carica un file CSV su MongoDB.
 | `enclosure` | string | SI | Delimitatore di testo (es. `"`) oppure `NONE` |
 | `modo` | string | SI | `TI`, `IA` oppure `IU` |
 | `logCollezione` | string | SI | Collezione MongoDB dove scrivere il log |
-| `chiaveUpsert` | string | Solo per IU | Campo usato come chiave per l'upsert |
+| `chiaveUpsert` | array di string | Solo per IU | Campi usati come chiave per l'upsert. Supporta chiave composta da piu' campi |
 | `batchSize` | integer | NO | Numero di righe per batch (default: `1000`). Controlla l'uso della RAM |
 | `colonneHash` | array di string | NO | Nomi delle colonne da mascherare con SHA-512 prima dell'inserimento |
 | `nomeVista` | string | NO | Nome della vista MongoDB da creare dopo il caricamento (default: `<collezione>_RAW`) |
@@ -248,7 +252,7 @@ curl -X POST http://localhost:8080/api/load \
     "enclosure":     "\"",
     "modo":          "IU",
     "logCollezione": "C_DR_APP_LOG_FILE_CSV",
-    "chiaveUpsert":  "id_record"
+    "chiaveUpsert":  ["id_record"]
   }'
 ```
 
