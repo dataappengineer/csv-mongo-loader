@@ -14,6 +14,7 @@ Documentazione interattiva disponibile tramite **Swagger UI**.
 - [Avvio del servizio](#avvio-del-servizio)
 - [Swagger UI](#swagger-ui)
 - [Endpoint REST](#endpoint-rest)
+- [Modalita' asincrona (callback)](#modalita-asincrona-callback)
 - [Esempi curl](#esempi-curl)
 - [Avvio MongoDB con Docker Compose](#avvio-mongodb-con-docker-compose)
 - [Build immagine Docker](#build-immagine-docker)
@@ -143,22 +144,29 @@ Carica un file CSV su MongoDB.
 | `batchSize` | integer | NO | Numero di righe per batch (default: `1000`). Controlla l'uso della RAM |
 | `colonneHash` | array di string | NO | Nomi delle colonne da mascherare con SHA-512 prima dell'inserimento |
 | `nomeVista` | string | NO | Nome della vista MongoDB da creare dopo il caricamento (default: `<collezione>_RAW`) |
+| `jobId` | string | NO | Identificativo job fornito dal chiamante. Restituito nel body 202 e nel payload del callback |
+| `callbackUrl` | string | NO | URL a cui inviare il risultato via POST al termine del caricamento. Se presente, il servizio risponde **202** immediatamente |
+| `callbackUser` | string | Solo se callbackUrl | Username per l'autenticazione Basic Auth sul callback |
+| `callbackPassword` | string | Solo se callbackUrl | Password per l'autenticazione Basic Auth sul callback |
 
 #### Tabella completa delle risposte
 
 | Situazione | HTTP | `status` | `records` | `message` |
 |---|:---:|---|:---:|---|
-| Caricamento riuscito | 200 | `SUCCESS` | n. righe caricate | `null` |
-| File CSV non trovato | 200 | `FILE_NOT_FOUND` | 0 | `null` |
+| Caricamento riuscito (sincrono) | 200 | `SUCCESS` | n. righe caricate | `null` |
+| File CSV non trovato (sincrono) | 200 | `FILE_NOT_FOUND` | 0 | `null` |
 | File CSV vuoto (solo header) | 200 | `EMPTY_FILE` | 0 | `null` |
 | Errore generico (es. MongoDB non raggiungibile) | 200 | `ERROR` | 0 | testo dell'errore |
+| Caricamento avviato in background (asincrono) | 202 | `ACCEPTED` | 0 | `"Elaborazione asincrona avviata"` |
 | Campo obbligatorio mancante nel body | 400 | `ERROR` | 0 | elenco campi mancanti |
 | `modo` non valido (es. `XX`) | 400 | `ERROR` | 0 | `"Il campo modo deve essere TI, IA o IU"` |
 | `modo: IU` senza `chiaveUpsert` | 400 | `ERROR` | 0 | `"Il campo chiaveUpsert e' obbligatorio..."` |
+| `callbackUrl` presente senza credenziali | 400 | `ERROR` | 0 | `"callbackUser e callbackPassword sono obbligatori..."` |
 
 > **Regola rapida:**
 > - **HTTP 400** → problema nel body della richiesta (colpa di chi chiama)
-> - **HTTP 200** → il servizio ha ricevuto la chiamata e risponde sempre, anche in caso di errore di business (file non trovato, MongoDB KO)
+> - **HTTP 200** → caricamento sincrono completato (verificare il campo `status`)
+> - **HTTP 202** → caricamento asincrono avviato; il risultato arriva via callback
 
 Esempio risposta successo:
 ```json
@@ -177,6 +185,50 @@ Esempio risposta errore validazione (HTTP 400):
   "message": "Tutti i campi obbligatori devono essere valorizzati: ..."
 }
 ```
+
+---
+
+## Modalita' asincrona (callback)
+
+Se il caricamento di file molto grandi rischia di causare timeout lato client (es. gateway con timeout 30s), e' possibile attivare la **modalita' asincrona** aggiungendo i campi `callbackUrl`, `callbackUser` e `callbackPassword` nel body della richiesta.
+
+### Flusso
+
+1. Il client invia `POST /api/load` con `callbackUrl` valorizzato.
+2. Il servizio risponde **immediatamente con HTTP 202** e avvia il caricamento su un thread separato.
+3. Al termine del caricamento (successo o errore) il servizio invia un **POST** all'URL di callback con autenticazione **Basic Auth** e il risultato nel body JSON.
+
+### Body della risposta 202
+
+```json
+{
+  "jobId":   "id57",
+  "status":  "ACCEPTED",
+  "records": 0,
+  "message": "Elaborazione asincrona avviata"
+}
+```
+
+### Payload inviato al callback (POST)
+
+```json
+{
+  "jobId":   "id57",
+  "status":  "SUCCESS",
+  "records": 50000,
+  "message": ""
+}
+```
+
+In caso di errore durante il caricamento, `status` sara' `ERROR` o `FILE_NOT_FOUND` e `message` conterra' la descrizione dell'errore.
+
+### Note
+- Il `jobId` e' generato dal chiamante e usato per correlare la risposta 202 con la notifica callback.
+- Se il callback non e' raggiungibile, l'errore viene loggato lato server senza retry.
+- Il timeout della chiamata al callback e' **30 secondi**.
+- La modalita' sincrona (senza `callbackUrl`) e' invariata: `callbackUrl` e' completamente opzionale.
+
+---
 
 #### Caricamento in streaming (batchSize)
 
@@ -279,6 +331,47 @@ Risposta attesa:
     "status": "SUCCESS",
     "records": 3,
     "message": null
+}
+```
+
+### Asincrono - Caricamento con callback (risposta 202 + notifica)
+
+```bash
+curl -X POST http://localhost:8080/api/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mongoUri":        "mongodb://localhost:27017",
+    "database":        "mydb",
+    "collezione":      "mycoll",
+    "csvPath":         "/data/in/dati.csv",
+    "separatore":      ",",
+    "enclosure":       "NONE",
+    "modo":            "TI",
+    "logCollezione":   "C_DR_APP_LOG_FILE_CSV",
+    "jobId":           "id57",
+    "callbackUrl":     "https://be.eka.it/api/callback",
+    "callbackUser":    "utente",
+    "callbackPassword":"password"
+  }'
+```
+
+Risposta immediata (HTTP 202):
+```json
+{
+  "jobId":   "id57",
+  "status":  "ACCEPTED",
+  "records": 0,
+  "message": "Elaborazione asincrona avviata"
+}
+```
+
+Al termine, il servizio invia automaticamente a `callbackUrl`:
+```json
+{
+  "jobId":   "id57",
+  "status":  "SUCCESS",
+  "records": 50000,
+  "message": ""
 }
 ```
 
