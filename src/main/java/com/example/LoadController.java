@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,6 +25,7 @@ import java.util.logging.Logger;
 public class LoadController {
 
     private static final Logger LOG = Logger.getLogger(LoadController.class.getName());
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final MongoCSVLoader service;
 
@@ -67,11 +69,11 @@ public class LoadController {
             return ResponseEntity.badRequest()
                     .body(new LoadResponse("ERROR", 0, "Il campo modo deve essere TI, IA o IU"));
         }
-        if (modo.equals("IU") && (request.getChiaveUpsert() == null || request.getChiaveUpsert().isEmpty())) {
-            return ResponseEntity.badRequest()
-                    .body(new LoadResponse("ERROR", 0,
-                            "Il campo chiaveUpsert e' obbligatorio per la modalita' IU"));
-        }
+        // La presenza della PK NON e' validata qui: la chiave puo' essere dichiarata
+        // con ;PK nella riga 1 del CSV (che il controller non legge) oppure con il
+        // parametro chiaveUpsert della chiamata. La verifica e' delegata al loader, che
+        // legge l'header e risponde 200 + status=ERROR se manca (come per gli altri
+        // errori rilevati leggendo il file).
 
         // Modalita' asincrona: se callbackUrl e' valorizzato
         if (!isBlank(request.getCallbackUrl())) {
@@ -103,13 +105,10 @@ public class LoadController {
         return ResponseEntity.ok(service.load(request));
     }
 
-    private void sendCallback(String url, String user, String password, String jobId, LoadResponse result) {
+    void sendCallback(String url, String user, String password, String jobId, LoadResponse result) {
         try {
-            String safeMessage = result.getMessage() != null
-                    ? result.getMessage().replace("\\", "\\\\").replace("\"", "\\\"") : "";
-            String body = String.format(
-                    "{\"jobId\":\"%s\",\"status\":\"%s\",\"records\":%d,\"message\":\"%s\"}",
-                    jobId, result.getStatus(), result.getRecords(), safeMessage);
+            result.setJobId(jobId);
+            String body = MAPPER.writeValueAsString(result); // report completo; escaping gestito da Jackson
 
             String credentials = Base64.getEncoder()
                     .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));

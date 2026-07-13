@@ -1,254 +1,264 @@
 package com.example;
 
+import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.*;
 import com.mongodb.client.model.*;
 import org.bson.Document;
 import org.springframework.stereotype.Service;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
-import java.util.regex.Pattern;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Servizio di caricamento CSV su MongoDB.
- * Modalita' supportate:
- *   TI = Truncate Insert  (svuota la collezione poi inserisce)
- *   IA = Insert Append    (inserisce senza toccare i dati esistenti)
- *   IU = Insert Update    (upsert: aggiorna se esiste, inserisce se nuovo)
+ *
+ * Formato CSV: riga 1 = tipi + flag (delimitatore flag '|'), riga 2 = nomi campi,
+ * righe 3+ = dati. Modalita': TI (truncate+insert), IA (append), IU (upsert per PK).
+ *
+ * Il parsing dell'header e la trasformazione dei dati sono delegati a
+ * CsvHeaderParser / CsvRecordProcessor / TransformerRegistry; qui restano
+ * l'orchestrazione (connessione, streaming a batch, scrittura, log, vista) e i
+ * conteggi inserted/updated ricavati da BulkWriteResult.
  */
 @Service
 public class MongoCSVLoader {
 
-    private static final DateTimeFormatter TS_FMT =
-            DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
-
+    private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
     private static final int DEFAULT_BATCH_SIZE = 1000;
+    private static final int HEADER_LINES = 2;
 
-    /**
-     * Esegue il caricamento del file CSV su MongoDB secondo i parametri ricevuti.
-     * Legge il file in streaming per batch di batchSize righe per evitare OutOfMemoryError.
-     * Le colonne in colonneHash vengono mascherate con SHA-512 prima dell'inserimento.
-     */
     public LoadResponse load(LoadRequest req) {
         String enclosure = "NONE".equalsIgnoreCase(req.getEnclosure()) ? "" : req.getEnclosure();
+        String separator = req.getSeparatore();
         String mode = req.getModo().toUpperCase();
-        List<String> updateKeys = req.getChiaveUpsert() != null
-                ? req.getChiaveUpsert() : Collections.emptyList();
         int batchSize = (req.getBatchSize() != null && req.getBatchSize() > 0)
                 ? req.getBatchSize() : DEFAULT_BATCH_SIZE;
-        List<String> colonneHash = req.getColonneHash() != null
-                ? req.getColonneHash() : Collections.emptyList();
 
         try (MongoClient mongoClient = MongoClients.create(req.getMongoUri())) {
             MongoDatabase db = mongoClient.getDatabase(req.getDatabase());
-            MongoCollection<Document> coll    = db.getCollection(req.getCollezione());
+            MongoCollection<Document> coll = db.getCollection(req.getCollezione());
             MongoCollection<Document> logColl = db.getCollection(req.getLogCollezione());
 
             File csvFile = new File(req.getCsvPath());
-
-            // Controllo presenza file
             if (!csvFile.exists()) {
                 logColl.insertOne(buildLog(req.getCsvPath(), mode, "FILE_NOT_FOUND", 0,
                         "File non trovato nel percorso indicato."));
-                return new LoadResponse("FILE_NOT_FOUND", 0,
-                        "File non trovato: " + req.getCsvPath());
+                return new LoadResponse("FILE_NOT_FOUND", 0, "File non trovato: " + req.getCsvPath());
             }
 
-            String status   = "SUCCESS";
+            LoadReport report = new LoadReport();
+            String status = "SUCCESS";
             String errorMsg = null;
-            int    count    = 0;
 
-            try {
-                // TI: svuota la collezione prima di iniziare lo streaming
+            try (BufferedReader br = CsvSafeReader.newUtf8Reader(csvFile)) {
+
+                String line1 = CsvSafeReader.sanitize(br.readLine(), true);
+                String line2 = CsvSafeReader.sanitize(br.readLine(), false);
+                if (line1 == null || line2 == null) {
+                    logColl.insertOne(buildLog(req.getCsvPath(), mode, "EMPTY_FILE", 0, null));
+                    return new LoadResponse("EMPTY_FILE", 0, null);
+                }
+
+                ColumnSchema[] schema;
+                try {
+                    schema = new CsvHeaderParser(separator, enclosure).parseHeader(line1, line2);
+                } catch (ValidationException e) {
+                    logColl.insertOne(buildLog(req.getCsvPath(), mode, "ERROR", 0, e.getMessage()));
+                    return new LoadResponse("ERROR", 0, "Header non valido: " + e.getMessage());
+                }
+
+                // Due modalita' per dichiarare PK/HASH: metadati nel CSV (flag ;PK/;HASH) oppure
+                // nella chiamata (chiaveUpsert/colonneHash). Se presenti entrambe, vince il CSV.
+                schema = applyHashFromRequest(schema, req);
+                List<String> pkFields = resolvePkFields(schema, req);
+                for (String pk : pkFields) {
+                    if (!columnExists(schema, pk)) {
+                        logColl.insertOne(buildLog(req.getCsvPath(), mode, "ERROR", 0,
+                                "chiaveUpsert riferisce colonna inesistente: " + pk));
+                        return new LoadResponse("ERROR", 0,
+                                "chiaveUpsert riferisce una colonna non presente nel file: " + pk);
+                    }
+                }
+                // La PK e' obbligatoria per TUTTI i modi (TI, IA, IU): identifica il record
+                // e abilita la verifica duplicati. Puo' venire dai flag ;PK di riga 1
+                // oppure dal parametro chiaveUpsert della chiamata.
+                if (pkFields.isEmpty()) {
+                    logColl.insertOne(buildLog(req.getCsvPath(), mode, "ERROR", 0, "Nessuna PK definita"));
+                    return new LoadResponse("ERROR", 0,
+                            "E' richiesto almeno un campo PK: flag ;PK nella riga 1 (oppure chiaveUpsert nel body)");
+                }
+
+                // Campo tecnico timestamp: calcolato UNA volta, uguale per tutti i record del
+                // caricamento (per il controllo dei delta). Non deve collidere con una colonna del file.
+                String tsField = CsvTypeConfig.getLoadTimestampField();
+                Object tsValue = CsvTypeConfig.buildLoadTimestamp(Instant.now());
+                if (columnExists(schema, tsField)) {
+                    logColl.insertOne(buildLog(req.getCsvPath(), mode, "ERROR", 0,
+                            "Il campo tecnico timestamp '" + tsField + "' collide con una colonna del file"));
+                    return new LoadResponse("ERROR", 0,
+                            "Il nome del campo tecnico timestamp ('" + tsField + "') coincide con una colonna del CSV: "
+                            + "rinominare la colonna o cambiare csv.load-timestamp-field");
+                }
+
                 if ("TI".equals(mode)) {
                     coll.deleteMany(new Document());
                 }
 
-                count = streamCSV(csvFile, req.getSeparatore(), enclosure,
-                        batchSize, colonneHash, mode, updateKeys, coll);
-
-                if (count == 0) {
-                    status = "EMPTY_FILE";
-                } else {
-                    renameFile(csvFile);
-                    String viewName = (req.getNomeVista() != null && !req.getNomeVista().isBlank())
-                            ? req.getNomeVista()
-                            : req.getCollezione() + "_RAW";
-                    createRawView(db, req.getCollezione(), viewName);
+                CsvRecordProcessor processor =
+                        new CsvRecordProcessor(schema, pkFields, separator, enclosure, tsField, tsValue);
+                List<Document> batch = new ArrayList<>(batchSize);
+                try {
+                    processor.processData(br, HEADER_LINES, report, doc -> {
+                        batch.add(doc);
+                        if (batch.size() >= batchSize) {
+                            flush(batch, mode, pkFields, coll, report);
+                            batch.clear();
+                        }
+                    });
+                    if (!batch.isEmpty()) {
+                        flush(batch, mode, pkFields, coll, report);
+                        batch.clear();
+                    }
+                } catch (RuntimeException e) {
+                    status = "ERROR";
+                    errorMsg = e.getMessage();
                 }
-            } catch (Exception e) {
-                status   = "ERROR";
+            } catch (IOException e) {
+                status = "ERROR";
                 errorMsg = e.getMessage();
-            } finally {
-                logColl.insertOne(buildLog(req.getCsvPath(), mode, status, count, errorMsg));
             }
 
-            return new LoadResponse(status, count, errorMsg);
+            // File con header ma senza righe dati -> EMPTY_FILE
+            if ("SUCCESS".equals(status) && report.recordsRead == 0) {
+                status = "EMPTY_FILE";
+            }
+
+            if ("SUCCESS".equals(status)) {
+                renameFile(csvFile);
+                String viewName = (req.getNomeVista() != null && !req.getNomeVista().isBlank())
+                        ? req.getNomeVista()
+                        : req.getCollezione() + "_RAW";
+                createRawView(db, req.getCollezione(), viewName);
+            }
+
+            int loaded = report.recordsLoaded();
+            logColl.insertOne(buildLog(req.getCsvPath(), mode, status, loaded, errorMsg));
+
+            LoadResponse resp = new LoadResponse(status, loaded, errorMsg);
+            resp.setRecordsRead(report.recordsRead);
+            resp.setRecordsInserted(report.recordsInserted);
+            resp.setRecordsUpdated(report.recordsUpdated);
+            resp.setRecordsSkipped(report.recordsSkipped);
+            resp.setRecordsDuplicati(report.recordsDuplicati);
+            resp.setErrors(report.errors);
+            return resp;
         }
     }
 
-    // ── Streaming CSV con batch ──────────────────────────────────────────────
-
-    private int streamCSV(File file, String separator, String enclosure,
-                          int batchSize, List<String> colonneHash,
-                          String mode, List<String> updateKeys,
-                          MongoCollection<Document> coll) throws IOException {
-        int total = 0;
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new FileInputStream(file), "UTF-8"))) {
-
-            String headerLine = br.readLine();
-            if (headerLine == null) return 0;
-
-            String[] headers = splitLine(headerLine, separator, enclosure);
-            List<Document> batch = new ArrayList<>(batchSize);
-            String line;
-
-            while ((line = br.readLine()) != null) {
-                if (line.isBlank()) continue;
-                String[] values = splitLine(line, separator, enclosure);
-                Document d = new Document();
-                for (int i = 0; i < headers.length; i++) {
-                    String colName = headers[i].trim();
-                    String val = i < values.length ? values[i] : "";
-                    if (!val.isEmpty() && colonneHash.contains(colName)) {
-                        val = sha512(val);
-                    }
-                    d.append(colName, val);
-                }
-                batch.add(d);
-
-                if (batch.size() >= batchSize) {
-                    flushBatch(batch, mode, updateKeys, coll);
-                    total += batch.size();
-                    batch.clear();
-                }
-            }
-
-            // ultimo batch parziale
-            if (!batch.isEmpty()) {
-                flushBatch(batch, mode, updateKeys, coll);
-                total += batch.size();
-                batch.clear();
-            }
+    /** Scrive un batch su MongoDB e aggiorna i conteggi inserted/updated nel report. */
+    private void flush(List<Document> batch, String mode, List<String> pkFields,
+                       MongoCollection<Document> coll, LoadReport report) {
+        if (batch.isEmpty()) {
+            return;
         }
-        return total;
-    }
-
-    private void flushBatch(List<Document> batch, String mode, List<String> updateKeys,
-                            MongoCollection<Document> coll) {
-        switch (mode) {
-            case "TI":
-            case "IA":
-                coll.insertMany(batch);
-                break;
-            case "IU":
-                List<WriteModel<Document>> ops = new ArrayList<>(batch.size());
-                UpdateOptions opt = new UpdateOptions().upsert(true);
-                for (Document d : batch) {
-                    Document filter = new Document();
-                    for (String key : updateKeys) {
-                        filter.append(key, d.get(key));
-                    }
-                    ops.add(new UpdateOneModel<>(filter, new Document("$set", d), opt));
+        if ("IU".equals(mode)) {
+            List<WriteModel<Document>> ops = new ArrayList<>(batch.size());
+            UpdateOptions opt = new UpdateOptions().upsert(true);
+            for (Document d : batch) {
+                Document filter = new Document();
+                for (String pk : pkFields) {
+                    filter.append(pk, d.get(pk));
                 }
-                coll.bulkWrite(ops);
-                break;
-            default:
-                throw new IllegalArgumentException(
-                        "Modalita' sconosciuta: '" + mode + "'. Usa TI, IA o IU.");
-        }
-    }
-
-    // ── SHA-512 ──────────────────────────────────────────────────────────────
-
-    private String sha512(String value) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-512");
-            byte[] hash = md.digest(value.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(128);
-            for (byte b : hash) {
-                sb.append(String.format("%02x", b));
+                ops.add(new UpdateOneModel<>(filter, new Document("$set", d), opt));
             }
-            return sb.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("SHA-512 non disponibile", e);
+            BulkWriteResult r = coll.bulkWrite(ops);
+            report.recordsInserted += r.getUpserts().size();   // upsert che hanno inserito
+            report.recordsUpdated += (int) r.getModifiedCount(); // documenti effettivamente modificati
+        } else { // TI, IA
+            coll.insertMany(batch);
+            report.recordsInserted += batch.size();
         }
     }
 
     /**
-     * Parsing RFC 4180: riconosce l'enclosure e tratta il separatore come
-     * delimitatore di campo SOLO quando non si trova all'interno di un campo
-     * delimitato. Gestisce anche le virgolette doppie escapate ("").
+     * Risolve i campi PK dalle due modalita' possibili: i flag ;PK della riga 1 del CSV
+     * oppure il parametro chiaveUpsert della chiamata. Se presenti i flag ;PK vincono;
+     * altrimenti si usa chiaveUpsert.
      */
-    private String[] splitLine(String line, String separator, String enclosure) {
-        // Fast path: nessun enclosure, split diretto
-        if (enclosure == null || enclosure.isEmpty()) {
-            return line.split(Pattern.quote(separator), -1);
-        }
-
-        char sep = separator.charAt(0);
-        char enc = enclosure.charAt(0);
-        List<String> fields = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        boolean inQuotes = false;
-
-        for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
-            if (inQuotes) {
-                if (c == enc) {
-                    // virgoletta doppia escapata: "" → un singolo "
-                    if (i + 1 < line.length() && line.charAt(i + 1) == enc) {
-                        current.append(enc);
-                        i++;
-                    } else {
-                        inQuotes = false; // fine campo delimitato
-                    }
-                } else {
-                    current.append(c);
-                }
-            } else {
-                if (c == enc) {
-                    inQuotes = true; // inizio campo delimitato
-                } else if (c == sep) {
-                    fields.add(current.toString());
-                    current.setLength(0);
-                } else {
-                    current.append(c);
-                }
+    static List<String> resolvePkFields(ColumnSchema[] schema, LoadRequest req) {
+        List<String> pk = new ArrayList<>();
+        for (ColumnSchema c : schema) {
+            if (c.isPK()) {
+                pk.add(c.getName());
             }
         }
-        fields.add(current.toString()); // ultimo campo
-        return fields.toArray(new String[0]);
+        if (pk.isEmpty() && req.getChiaveUpsert() != null && !req.getChiaveUpsert().isEmpty()) {
+            return new ArrayList<>(req.getChiaveUpsert());
+        }
+        return pk;
     }
 
-    // ── Rename file ──────────────────────────────────────────────────────────
+    /**
+     * Applica l'hashing indicato nella chiamata (parametro colonneHash) solo se in riga 1
+     * non e' presente alcun flag ;HASH. Vale unicamente per le colonne di tipo S con nome
+     * corrispondente. Ritorna lo schema originale se non c'e' nulla da applicare.
+     */
+    static ColumnSchema[] applyHashFromRequest(ColumnSchema[] schema, LoadRequest req) {
+        for (ColumnSchema c : schema) {
+            if (c.isShouldHash()) {
+                return schema; // i flag ;HASH del CSV vincono
+            }
+        }
+        List<String> hashCols = req.getColonneHash();
+        if (hashCols == null || hashCols.isEmpty()) {
+            return schema;
+        }
+        ColumnSchema[] out = new ColumnSchema[schema.length];
+        for (int i = 0; i < schema.length; i++) {
+            ColumnSchema c = schema[i];
+            if ("S".equals(c.getType()) && hashCols.contains(c.getName())) {
+                out[i] = new ColumnSchema(c.getName(), c.getType(), c.getFlags(), c.isPK(),
+                        true, c.isKeepCase(), c.isNoCleanup(), c.getMaskMode(), c.getTruncateLength());
+            } else {
+                out[i] = c;
+            }
+        }
+        return out;
+    }
+
+    private static boolean columnExists(ColumnSchema[] schema, String name) {
+        for (ColumnSchema c : schema) {
+            if (c.getName().equals(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private void renameFile(File file) {
-        String ts      = LocalDateTime.now().format(TS_FMT);
+        String ts = LocalDateTime.now().format(TS_FMT);
         String newName = file.getName().replace(".csv", "_loaded_" + ts + ".csv");
-        File   renamed = new File(file.getParent(), newName);
+        File renamed = new File(file.getParent(), newName);
         if (!file.renameTo(renamed)) {
             System.err.println("Attenzione: impossibile rinominare " + file.getPath());
         }
     }
 
-    // ── Vista _RAW ───────────────────────────────────────────────────────────
-
     private void createRawView(MongoDatabase db, String collName, String viewName) {
-        try { db.getCollection(viewName).drop(); } catch (Exception ignored) { }
-        db.createView(viewName, collName, Collections.emptyList());
+        try {
+            db.getCollection(viewName).drop();
+        } catch (Exception ignored) {
+        }
+        db.createView(viewName, collName, java.util.Collections.emptyList());
     }
 
-    // ── Documento di log ─────────────────────────────────────────────────────
-
-    private Document buildLog(String fileName, String type,
-                               String status, int records, String message) {
+    private Document buildLog(String fileName, String type, String status, int records, String message) {
         Document log = new Document()
                 .append("fileName", fileName)
                 .append("timestamp", LocalDateTime.now().toString())
