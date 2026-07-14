@@ -1,7 +1,7 @@
 services:
 
   mongo:
-    image: mongo:7
+    image: mongo:8.0
     container_name: csv_mongo
     ports:
       - "27017:27017"
