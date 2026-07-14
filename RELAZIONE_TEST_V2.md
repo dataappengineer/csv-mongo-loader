@@ -8,8 +8,9 @@ Questo documento descrive il processo di validazione e i risultati dei test eseg
 1. [Strategia di Testing: Come abbiamo validato il software](#strategia-di-testing-come-abbiamo-validato-il-software)
 2. [Riepilogo Risultati](#riepilogo-risultati)
 3. [Dettaglio Aree Funzionali](#dettaglio-aree-funzionali)
-4. [Esempi di Test Reali (E2E)](#esempi-di-test-reali-e2e)
-5. [Controlli di Qualità e Robustezza](#controlli-di-qualità-e-robustezza)
+4. [Dettaglio dei Test Funzionali (Collaudo "Su Strada")](#dettaglio-dei-test-funzionali-collaudo-su-strada)
+5. [Esempi di Test Reali (E2E)](#esempi-di-test-reali-e2e)
+6. [Controlli di Qualità e Robustezza](#controlli-di-qualità-e-robustezza)
 
 ---
 
