@@ -62,6 +62,71 @@ Ogni tipo di dato ha un motore di conversione dedicato:
 
 ---
 
+## Dettaglio dei Test Funzionali (Collaudo "Su Strada")
+
+A differenza dei test automatici di Maven, queste prove sono state eseguite inviando richieste HTTP reali ad un'istanza dell'applicazione attiva, simulando esattamente ciò che farà l'orchestratore o l'utente finale.
+
+### Scenario 1: Caricamento TI (Truncate Insert) con Hashing e PK
+**Obiettivo:** Verificare che il sistema svuoti la collezione, inserisca nuovi dati e applichi l'anonimizzazione dove richiesto.
+
+*   **File Test:** `test_ti.csv` (Header: `S;PK, S;HASH, DD`)
+*   **Richiesta API:**
+    ```bash
+    curl -X POST http://localhost:8080/api/load \
+      -d '{
+        "mongoUri": "mongodb://localhost:27017",
+        "database": "client_db",
+        "collezione": "utenti",
+        "csvPath": "/tmp/test_ti.csv",
+        "modo": "TI"
+      }'
+    ```
+*   **Esito Verificato:** 
+    *   La collezione è stata svuotata prima dell'inserimento.
+    *   Il campo `S;HASH` nel database appare come una stringa SHA-512 di 128 caratteri (irreversibile).
+    *   Il campo tecnico `T` è presente e identico per tutti i record.
+
+### Scenario 2: Upsert (IU) con gestione Duplicati e Scarti
+**Obiettivo:** Gestire un file "sporco" dove ci sono record duplicati internamente e record con tipi errati.
+
+*   **File Test:** `test_iu.csv` (Contiene un record con PK duplicata e uno con una stringa al posto di un numero).
+*   **Risposta Ricevuta:**
+    ```json
+    {
+      "status": "SUCCESS",
+      "recordsRead": 10,
+      "recordsInserted": 7,
+      "recordsUpdated": 1,
+      "recordsSkipped": 1,
+      "recordsDuplicati": 1
+    }
+    ```
+*   **Esito Verificato:** 
+    *   Il sistema non si è bloccato.
+    *   Il record duplicato è stato ignorato correttamente (vince la prima occorrenza).
+    *   Il record con "tipo errato" è stato scartato e il dettaglio dell'errore è apparso nella lista `errors`.
+
+### Scenario 3: Transizione Anno a 2 Cifre (Pivot 2000-2099)
+**Obiettivo:** Assicurarsi che le date con anno abbreviato vengano interpretate correttamente nel secolo attuale.
+
+*   **Input CSV:** `05/06/24` e `12/12/99`.
+*   **Esito Verificato su MongoDB:**
+    *   `05/06/24` -> `2024-06-05T00:00:00Z`
+    *   `12/12/99` -> `2099-12-12T00:00:00Z`
+*   **Nota:** Questo garantisce la compatibilità con i sistemi legacy che esportano date in formato breve.
+
+### Scenario 4: Modalità Asincrona (Callback Post-Caricamento)
+**Obiettivo:** Testare il flusso per file di grandi dimensioni che richiedono più di 30 secondi.
+
+*   **Flusso di Test:**
+    1. Inviata richiesta con `callbackUrl` e credenziali Basic Auth.
+    2. Ricevuto immediatamente HTTP `202 ACCEPTED` con un `jobId`.
+    3. Monitorato il server di callback esterno.
+*   **Esito Verificato:**
+    *   Al termine del caricamento, il server di callback ha ricevuto una POST contenente lo stesso JSON di report della modalità sincrona, permettendo all'orchestratore di chiudere il task.
+
+---
+
 ## Esempi di Test Reali (E2E)
 
 Durante la fase di test "fumo" (smoke test), sono state simulate chiamate API complete. Ecco un esempio di un'operazione di **Upsert (IU)** con chiave composta:
