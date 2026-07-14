@@ -12,7 +12,7 @@ Esito complessivo: **119 test automatici, 119 PASS** con Docker attivo (E2E incl
 mvn test
 
 # Gli integration test E2E richiedono MongoDB locale:
-docker compose up -d      # avvia MongoDB 7 su localhost:27017
+docker compose up -d      # avvia MongoDB 8 su localhost:27017
 mvn test                  # ora girano anche gli E2E
 docker compose down       # a fine test
 ```
