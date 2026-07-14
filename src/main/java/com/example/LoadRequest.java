@@ -30,13 +30,13 @@ public class LoadRequest {
     @Schema(description = "Nome della collezione di log", example = "C_DR_APP_LOG_FILE_CSV")
     private String logCollezione;
 
-    @Schema(description = "Campi chiave per la modalita' IU (upsert). Supporta chiave composta da piu' campi. Obbligatorio solo se modo=IU", example = "[\"id_chiave\"]")
+    @Schema(description = "Chiave primaria dichiarata nella chiamata: modalita' alternativa ai flag ;PK nel CSV. Supporta chiave composta. Opzionale: usata solo se la riga 1 non contiene alcun ;PK. La PK e' comunque richiesta (da ;PK oppure da qui) per tutti i modi.", example = "[\"id_chiave\"]")
     private List<String> chiaveUpsert;
 
     @Schema(description = "Numero di record per batch (default 1000). Opzionale.", example = "1000")
     private Integer batchSize;
 
-    @Schema(description = "Lista di nomi colonne da mascherare con SHA-512. Opzionale.", example = "[\"codice_fiscale\", \"cognome\"]")
+    @Schema(description = "Nomi colonne da hashare con SHA-512, dichiarate nella chiamata: modalita' alternativa al flag ;HASH nel CSV. Opzionale: usata solo se la riga 1 non contiene alcun ;HASH (e solo su colonne di tipo S).", example = "[\"codice_fiscale\", \"cognome\"]")
     private List<String> colonneHash;
 
     @Schema(description = "Nome della vista MongoDB da creare dopo il caricamento. Se assente viene usato <collezione>_RAW.", example = "mia_vista_RAW")

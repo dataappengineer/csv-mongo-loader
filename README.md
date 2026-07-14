@@ -37,7 +37,40 @@ Dopo ogni caricamento riuscito il servizio:
 - **scrive un documento di log** nella collezione configurata
 
 Il caricamento avviene in **streaming per batch** (`batchSize` righe alla volta) per gestire file di grandi dimensioni senza esaurire la memoria.
-Le colonne sensibili possono essere **mascherate con SHA-512** prima dell'inserimento tramite il parametro `colonneHash`.
+Le colonne sensibili possono essere **anonimizzate con SHA-512** dichiarando il flag `;HASH` nella riga 1 del CSV (vedi sotto).
+
+---
+
+## Formato del file CSV
+
+Il file ha **tre parti**: due righe di header + le righe dati. Guida completa alla compilazione in `GUIDA_CSV.md`; qui il riassunto operativo.
+
+```csv
+I;PK,S;HASH,S,D,B,DD            <- Riga 1: tipo di ogni campo + flag opzionali
+id,codice_fiscale,nome,data,attivo,importo   <- Riga 2: nomi campi MongoDB
+1,RSSMRA80A01H501U,mario rossi,9/7/2026,SI,2500.50   <- Riga 3+: dati
+```
+
+**Tipi (riga 1):** `I` integer (Long/Int64), `S` string, `D` date, `DT` datetime, `DD` double, `B` boolean.
+
+**Flag opzionali (riga 1), separati da `;`:**
+
+| Flag | Tipi | Effetto |
+|------|------|---------|
+| `PK` | I, S, D, DT, DD | Chiave primaria. **Obbligatoria: almeno un `;PK` per file, in tutti i modi** (identifica il record, abilita la verifica duplicati; per IU e' la chiave dell'upsert). Piu' flag `PK` = chiave composta |
+| `HASH` | S | Anonimizza con SHA-512 |
+| `KEEP_CASE` | S | Non forza il maiuscolo (preserva il case originale) |
+| `NO_CLEANUP` | S | Non rimuove i caratteri speciali (utile per email, path) |
+| `MASK:N` | S | Mostra solo gli ultimi N caratteri (anche `MASK:FULL`, `MASK:FIRST`) |
+| `TRUNCATE:N` | S | Tronca a N caratteri |
+
+> ⚠️ Il delimitatore tipo/flag e' `;`: il **separatore di colonna del CSV non puo' essere `;`** quando si usano i flag (usare `,` o TAB). L'argomento di `MASK`/`TRUNCATE` usa `:`.
+
+**Trasformazioni automatiche (sempre applicate):** trim, normalizzazione spazi, UTF-8, strip BOM, normalizzazione Unicode NFC (accenti preservati). Per S anche maiuscolo (salvo `KEEP_CASE` o colonna `PK`, che preserva il case) e pulizia caratteri speciali (salvo `NO_CLEANUP`). Per `I` solo cifre con segno (nessun decimale/separatore); per `DD` virgola/punto decimale (no separatore migliaia). Per D/DT date/ore a cifra singola o doppia (es. `9/7/2026`), spazi multipli tollerati, validazione stretta (le date/ore invalide sono scartate).
+
+**Campo tecnico timestamp:** a ogni record caricato viene aggiunto un campo tecnico (default `T`) con l'istante del caricamento, **uguale per tutti i record dello stesso load**, utile per il controllo dei delta successivi. Formato di default `epoch` (long millis); nome e formato configurabili (vedi `csv.load-timestamp-*`).
+
+**Controlli:** tutti i campi sono obbligatori (cella vuota -> record scartato); i tipi incoerenti e le PK duplicate nel file vengono scartati e conteggiati, **senza interrompere** il caricamento.
 
 ---
 
@@ -48,6 +81,50 @@ Le colonne sensibili possono essere **mascherate con SHA-512** prima dell'inseri
 - MongoDB Driver Sync 4.11.1
 - springdoc-openapi-ui 1.7.0 (Swagger)
 - Maven 3.x
+
+---
+
+## Installazione e configurazione
+
+### Prerequisiti
+
+- **JDK 11+** a runtime (build verificata anche con JDK 21).
+- **Maven 3.x** per la build.
+- Un'istanza **MongoDB** raggiungibile: l'URI viene passato nel body di ogni chiamata (`mongoUri`), non è cablato nel servizio.
+- Il file CSV deve risiedere in un **percorso leggibile dal processo del servizio** (`csvPath`). In container serve un volume condiviso / PVC (vedi sezione Kubernetes).
+
+### Properties (configurazione runtime)
+
+Il servizio usa solo `src/main/resources/application.properties`:
+
+| Property | Default | Note |
+|----------|---------|------|
+| `server.port` | `8080` | Porta HTTP. Override via env: `SERVER_PORT` |
+| `spring.application.name` | `csv-mongo-loader` | Override via env: `SPRING_APPLICATION_NAME` |
+| `spring.autoconfigure.exclude` | `org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration` | Disattiva l'auto-config MongoDB di Spring: la connessione è creata manualmente, per-richiesta, dall'URI ricevuto nel body |
+
+#### Configurazione dei tipi CSV (`csv.*`)
+
+Formati e valori dei tipi, sovrascrivibili a startup. In K8s si impostano via env (es. `CSV_TIMEZONE`, `CSV_DATE_FORMATS`). Se non impostate valgono i default qui sotto (= comportamento storico).
+
+| Property | Default | Note |
+|----------|---------|------|
+| `csv.timezone` | `UTC` | Timezone per i tipi `D` e `DT` |
+| `csv.date-formats` | `dd/MM/yyyy,d/M/yyyy,dd/MM/yy,d/M/yy,yyyy-M-d,d-M-yyyy` | Formati data accettati (STRICT), in ordine di tentativo. Default primario `dd/MM/yyyy`; tollerati anche cifra singola, **anno a 2 cifre** (`dd/MM/yy`, pivot 2000-2099) e ISO |
+| `csv.datetime-formats` | `dd/MM/yyyy HH:mm:ss,d/M/yyyy H:mm:ss,d/M/yy H:mm:ss,yyyy-M-d H:mm:ss,yyyy-M-d'T'H:mm:ss,yyyy-M-d'T'H:mm:ss'Z'` | Formati datetime (tipo `DT`). Default primario `dd/MM/yyyy HH:mm:ss`; spazi multipli tra data e ora tollerati |
+| `csv.boolean-true` | `SI,S,TRUE,1,Y,YES,VRAI,V` | Valori interpretati come `true` (case-insensitive) |
+| `csv.boolean-false` | `NO,N,FALSE,0,FAUX,F` | Valori interpretati come `false` (case-insensitive) |
+| `csv.load-timestamp-field` | `T` | Nome del campo tecnico timestamp aggiunto a ogni record |
+| `csv.load-timestamp-format` | `epoch` | Formato del valore: `epoch` (long millis), `date` (BSON ISODate), `iso` (stringa ISO-8601) |
+
+> Il **locale** è fisso a `ROOT` (determinismo cross-piattaforma) e **non** è configurabile.
+> I parametri di caricamento (`mongoUri`, `database`, `csvPath`, `modo`, ecc.) **non** sono properties: viaggiano nel body della POST ad ogni chiamata.
+
+### Documenti collegati
+
+- **Compilazione del file CSV**: [`GUIDA_CSV.md`](GUIDA_CSV.md)
+- **Modifiche rispetto alla versione iniziale**: [`CHANGELOG.md`](CHANGELOG.md)
+- **Report dei test**: [`TEST_RESULTS.md`](TEST_RESULTS.md)
 
 ---
 
@@ -140,47 +217,72 @@ Carica un file CSV su MongoDB.
 | `enclosure` | string | SI | Delimitatore di testo (es. `"`) oppure `NONE` |
 | `modo` | string | SI | `TI`, `IA` oppure `IU` |
 | `logCollezione` | string | SI | Collezione MongoDB dove scrivere il log |
-| `chiaveUpsert` | array di string | Solo per IU | Campi usati come chiave per l'upsert. Supporta chiave composta da piu' campi |
+| `chiaveUpsert` | array di string | NO | Chiave primaria dichiarata **nella chiamata** (modalita' alternativa ai flag `;PK` nel CSV). Usata solo se la riga 1 non contiene alcun `;PK` |
 | `batchSize` | integer | NO | Numero di righe per batch (default: `1000`). Controlla l'uso della RAM |
-| `colonneHash` | array di string | NO | Nomi delle colonne da mascherare con SHA-512 prima dell'inserimento |
+| `colonneHash` | array di string | NO | Colonne da hashare dichiarate **nella chiamata** (modalita' alternativa al flag `;HASH` nel CSV). Usato solo se la riga 1 non contiene alcun `;HASH` (e solo su colonne di tipo S) |
 | `nomeVista` | string | NO | Nome della vista MongoDB da creare dopo il caricamento (default: `<collezione>_RAW`) |
 | `jobId` | string | NO | Identificativo job fornito dal chiamante. Restituito nel body 202 e nel payload del callback |
 | `callbackUrl` | string | NO | URL a cui inviare il risultato via POST al termine del caricamento. Se presente, il servizio risponde **202** immediatamente |
 | `callbackUser` | string | Solo se callbackUrl | Username per l'autenticazione Basic Auth sul callback |
 | `callbackPassword` | string | Solo se callbackUrl | Password per l'autenticazione Basic Auth sul callback |
 
+#### Campi del report (nella risposta)
+
+| Campo | Descrizione |
+|-------|-------------|
+| `status` | `SUCCESS`, `FILE_NOT_FOUND`, `EMPTY_FILE`, `ERROR`, `ACCEPTED` |
+| `records` | Record **caricati** (inseriti + aggiornati). Semantica invariata rispetto alle versioni precedenti |
+| `recordsRead` | Record totali letti dal CSV (righe dati), inclusi scartati e duplicati |
+| `recordsInserted` | Record inseriti |
+| `recordsUpdated` | Record aggiornati (modo IU) |
+| `recordsSkipped` | Record scartati (campo vuoto, tipo incoerente, PK mancante) |
+| `recordsDuplicati` | Record scartati perche' PK duplicata nel file |
+| `errors` | Elenco errori dettagliati (max 100) |
+| `jobId` | Presente solo in modalita' asincrona (202) |
+
+Invariante: `recordsRead = records + recordsSkipped + recordsDuplicati`.
+
 #### Tabella completa delle risposte
 
-| Situazione | HTTP | `status` | `records` | `message` |
-|---|:---:|---|:---:|---|
-| Caricamento riuscito (sincrono) | 200 | `SUCCESS` | n. righe caricate | `null` |
-| File CSV non trovato (sincrono) | 200 | `FILE_NOT_FOUND` | 0 | `null` |
-| File CSV vuoto (solo header) | 200 | `EMPTY_FILE` | 0 | `null` |
-| Errore generico (es. MongoDB non raggiungibile) | 200 | `ERROR` | 0 | testo dell'errore |
-| Caricamento avviato in background (asincrono) | 202 | `ACCEPTED` | 0 | `"Elaborazione asincrona avviata"` |
-| Campo obbligatorio mancante nel body | 400 | `ERROR` | 0 | elenco campi mancanti |
-| `modo` non valido (es. `XX`) | 400 | `ERROR` | 0 | `"Il campo modo deve essere TI, IA o IU"` |
-| `modo: IU` senza `chiaveUpsert` | 400 | `ERROR` | 0 | `"Il campo chiaveUpsert e' obbligatorio..."` |
-| `callbackUrl` presente senza credenziali | 400 | `ERROR` | 0 | `"callbackUser e callbackPassword sono obbligatori..."` |
+| Situazione | HTTP | `status` | `message` |
+|---|:---:|---|---|
+| Caricamento riuscito (sincrono) | 200 | `SUCCESS` | `null` |
+| File CSV non trovato | 200 | `FILE_NOT_FOUND` | testo dell'errore |
+| File senza righe dati | 200 | `EMPTY_FILE` | `null` |
+| Errore generico (es. MongoDB non raggiungibile) | 200 | `ERROR` | testo dell'errore |
+| Header riga 1/2 non valido | 200 | `ERROR` | `"Header non valido: ..."` |
+| Caricamento asincrono avviato | 202 | `ACCEPTED` | `"Elaborazione asincrona avviata"` |
+| Campo obbligatorio mancante nel body | 400 | `ERROR` | elenco campi mancanti |
+| `modo` non valido (es. `XX`) | 400 | `ERROR` | `"Il campo modo deve essere TI, IA o IU"` |
+| Nessuna PK definita (qualsiasi modo) | 200 | `ERROR` | `"E' richiesto almeno un campo PK..."` |
+| `callbackUrl` presente senza credenziali | 400 | `ERROR` | `"callbackUser e callbackPassword sono obbligatori..."` |
 
 > **Regola rapida:**
-> - **HTTP 400** → problema nel body della richiesta (colpa di chi chiama)
-> - **HTTP 200** → caricamento sincrono completato (verificare il campo `status`)
-> - **HTTP 202** → caricamento asincrono avviato; il risultato arriva via callback
+> - **HTTP 400** -> problema nel body della richiesta (colpa di chi chiama)
+> - **HTTP 200** -> caricamento sincrono completato (verificare il campo `status`)
+> - **HTTP 202** -> caricamento asincrono avviato; il risultato arriva via callback
 
-Esempio risposta successo:
+Esempio risposta successo (con qualche scarto):
 ```json
 {
-  "status":  "SUCCESS",
-  "records": 5,
-  "message": null
+  "status": "SUCCESS",
+  "records": 93,
+  "recordsRead": 100,
+  "recordsInserted": 93,
+  "recordsUpdated": 0,
+  "recordsSkipped": 5,
+  "recordsDuplicati": 2,
+  "message": null,
+  "errors": [
+    "Riga 12, colonna importo: numero non valido (valore: abc)"
+  ]
 }
 ```
 
 Esempio risposta errore validazione (HTTP 400):
 ```json
 {
-  "status":  "ERROR",
+  "status": "ERROR",
   "records": 0,
   "message": "Tutti i campi obbligatori devono essere valorizzati: ..."
 }
@@ -211,12 +313,20 @@ Se il caricamento di file molto grandi rischia di causare timeout lato client (e
 
 ### Payload inviato al callback (POST)
 
+Stessa struttura della risposta sincrona, con in piu' `jobId`:
+
 ```json
 {
-  "jobId":   "id57",
-  "status":  "SUCCESS",
+  "jobId": "id57",
+  "status": "SUCCESS",
   "records": 50000,
-  "message": ""
+  "recordsRead": 50000,
+  "recordsInserted": 50000,
+  "recordsUpdated": 0,
+  "recordsSkipped": 0,
+  "recordsDuplicati": 0,
+  "message": null,
+  "errors": []
 }
 ```
 
@@ -365,15 +475,7 @@ Risposta immediata (HTTP 202):
 }
 ```
 
-Al termine, il servizio invia automaticamente a `callbackUrl`:
-```json
-{
-  "jobId":   "id57",
-  "status":  "SUCCESS",
-  "records": 50000,
-  "message": ""
-}
-```
+Al termine, il servizio invia automaticamente a `callbackUrl` il report completo (vedi "Payload inviato al callback").
 
 ### TI - File inesistente (risposta FILE_NOT_FOUND)
 
@@ -569,16 +671,16 @@ env:
 |---|---|---|
 | `SERVER_PORT` | `8080` | `env` nel Deployment o ConfigMap |
 | `SPRING_APPLICATION_NAME` | `csv-mongo-loader` | `env` nel Deployment o ConfigMap |
-| credenziali MongoDB | — | `Secret` K8s, referenziato in `env` |
+| credenziali MongoDB | - | `Secret` K8s, referenziato in `env` |
 
 > I parametri `mongoUri`, `database`, `collezione`, `csvPath` ecc. **non** vanno nelle
-> variabili d'ambiente — vengono passati nel body della POST dall'orchestratore ad ogni chiamata.
+> variabili d'ambiente - vengono passati nel body della POST dall'orchestratore ad ogni chiamata.
 
 ### Autenticazione MongoDB: locale vs collaudo/produzione
 
 Il campo `mongoUri` cambia in base all'ambiente perche' MongoDB puo' girare con o senza autenticazione.
 
-**In locale (Docker Compose)** — MongoDB e' avviato senza credenziali, quindi l'URI non le richiede:
+**In locale (Docker Compose)** - MongoDB e' avviato senza credenziali, quindi l'URI non le richiede:
 ```json
 "mongoUri": "mongodb://localhost:27017"
 ```
@@ -586,12 +688,12 @@ Il campo `mongoUri` cambia in base all'ambiente perche' MongoDB puo' girare con 
 Questo funziona perche' il `docker-compose.yml` avvia MongoDB **senza** `MONGO_INITDB_ROOT_USERNAME`
 e `MONGO_INITDB_ROOT_PASSWORD`, lasciandolo aperto.
 
-**In collaudo / produzione K8s** — MongoDB ha autenticazione abilitata, le credenziali vanno nell'URI:
+**In collaudo / produzione K8s** - MongoDB ha autenticazione abilitata, le credenziali vanno nell'URI:
 ```json
 "mongoUri": "mongodb://utente_collaudo:password_segreta@mongo-svc:27017/reportistica_sanita"
 ```
 
-Il servizio csv-mongo-loader non conosce la password a priori — la riceve nell'URI
+Il servizio csv-mongo-loader non conosce la password a priori - la riceve nell'URI
 ad ogni chiamata dall'orchestratore, che la recupera dal **K8s Secret**:
 
 ```
@@ -662,15 +764,40 @@ kubectl set image deployment/csv-mongo-loader csv-mongo-loader=registry.azienda.
 ```
 csv-mongo-loader/
 ├── src/main/java/com/example/
+│   │  # Web / entry point
 │   ├── CsvMongoLoaderApplication.java   # Entry point Spring Boot
-│   ├── LoadController.java              # @RestController POST /api/load
+│   ├── LoadController.java              # @RestController POST /api/load + callback async
 │   ├── LoadRequest.java                 # DTO body della richiesta
-│   ├── LoadResponse.java                # DTO risposta JSON
-│   └── MongoCSVLoader.java              # @Service logica di business
+│   ├── LoadResponse.java                # DTO risposta JSON (con report)
+│   │  # Orchestrazione caricamento
+│   ├── MongoCSVLoader.java              # @Service: connessione, streaming, flush, log, vista
+│   ├── CsvRecordProcessor.java          # elabora le righe dati -> Document (senza Mongo)
+│   ├── LoadReport.java                  # accumulatore conteggi/errori
+│   │  # Parsing header e lettura CSV
+│   ├── CsvHeaderParser.java             # riga 1 (tipi+flag) + riga 2 (nomi) -> schema
+│   ├── ColumnSchema.java                # metadati di una colonna (tipo, flag)
+│   ├── CsvLineSplitter.java             # split riga CSV (RFC 4180)
+│   ├── CsvSafeReader.java               # UTF-8 + strip BOM + normalizzazione NFC
+│   │  # Trasformazione tipi (Transformer pattern)
+│   ├── FieldTransformer.java            # interfaccia (validate + transform)
+│   ├── TransformerRegistry.java         # factory tipo -> transformer
+│   ├── CsvTypeConfig.java               # formati date/datetime, boolean, timezone, campo tecnico TS
+│   ├── CsvTypeConfigBinder.java         # @Component: applica le property csv.* a startup
+│   ├── IntegerTransformer.java          # I -> Long (Int64)
+│   ├── DoubleTransformer.java           # DD -> Double
+│   ├── StringTransformer.java           # S -> String (HASH, MASK, KEEP_CASE, ...)
+│   ├── DateTransformer.java             # D -> Date (STRICT)
+│   ├── BooleanTransformer.java          # B -> Boolean
+│   ├── DateTimeTransformer.java         # DT -> Date UTC (STRICT)
+│   ├── ValidationException.java         # errore header/validazione
+│   └── TransformException.java          # errore trasformazione valore
+├── src/test/java/com/example/          # 104 test: unit, integrazione E2E, callback
 ├── src/main/resources/
-│   └── application.properties           # Porta 8080, configurazione
+│   └── application.properties           # server.port, app name, esclusione MongoAutoConfiguration
 ├── Dockerfile                           # Build immagine Docker
 ├── docker-compose.yml                   # MongoDB + Mongo Express (sviluppo locale)
-├── pom.xml                              # Spring Boot 2.7.18 + springdoc
+├── pom.xml                              # Spring Boot 2.7.18 + springdoc + starter-test
+├── GUIDA_CSV.md                         # come compilare il file CSV (per chi produce i dati)
+├── CHANGELOG.md                         # modifiche rispetto alla versione iniziale
 └── README.md
 ```
