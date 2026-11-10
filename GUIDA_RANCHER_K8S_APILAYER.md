@@ -4,50 +4,34 @@ Guida specifica per applicare la transizione HTTPS/TLS al modulo **csv-mongo-loa
 
 ---
 
-## 0. Prerequisiti: Generazione Certificato JKS e Creazione Secret K8s
+## 0. Prerequisiti: Generazione Certificato JKS e Creazione Secret K8s (PowerShell / riga singola)
 
-Eseguire questi comandi **sul proprio terminale locale (WSL / Linux)** dove sono installati `keytool` (Java) e `kubectl`:
+I comandi seguenti sono formattati su **stringa unica** per poter essere copiati e incollati direttamente su **PowerShell** senza errori di interruzione riga.
 
-### 0.1 Generare il file `server.jks` da zero
+### 0.1 Generare il file `server.jks` (Copia ed esegui questa stringa unica)
 
-Eseguire nella cartella di lavoro corrente:
-
-```bash
-keytool -genkeypair \
-  -alias server \
-  -keyalg RSA \
-  -keysize 2048 \
-  -storetype JKS \
-  -keystore server.jks \
-  -validity 730 \
-  -storepass PasswordSicura123! \
-  -keypass PasswordSicura123! \
-  -dname "CN=csv.loader.dss.local, OU=DSS, O=RegionePuglia, C=IT" \
-  -ext "SAN=dns:csv.loader.dss.local,dns:csv-loader-svc,dns:localhost"
+```powershell
+keytool -genkeypair -alias server -keyalg RSA -keysize 2048 -storetype JKS -keystore server.jks -validity 730 -storepass PasswordSicura123! -keypass PasswordSicura123! -dname "CN=csv.loader.dss.local, OU=DSS, O=RegionePuglia, C=IT" -ext "SAN=dns:csv.loader.dss.local,dns:csv-loader-svc,dns:localhost"
 ```
 
 > **Dettagli del comando:**
-> - Genera il file fisico **`server.jks`** nella cartella locale corrente.
-> - L'alias della chiave è impostato su **`server`** (da usare nella variabile `SERVER_SSL_KEY_ALIAS`).
-> - Il certificato include il dominio effettivo dell'ingress (`csv.loader.dss.local`), il service interno (`csv-loader-svc`) e `localhost`.
-> - Sostituire `PasswordSicura123!` con la password concordata con il cliente.
+> - Genera il file fisico **`server.jks`** nella cartella corrente.
+> - Alias: **`server`** (da usare nella variabile `SERVER_SSL_KEY_ALIAS`).
+> - Include i SAN: `csv.loader.dss.local`, `csv-loader-svc`, `localhost`.
+> - Sostituire `PasswordSicura123!` con la password desiderata.
 
 ---
 
-### 0.2 Creare i Secret Kubernetes nel namespace `apilayer`
+### 0.2 Creare i Secret Kubernetes nel namespace `apilayer` (Esegui queste 2 righe singole)
 
-Dalla **stessa cartella locale** in cui si trova il file `server.jks` appena creato, eseguire:
+Dalla stessa cartella in cui hai appena generato `server.jks`:
 
-```bash
-# 1. Secret contenente il file JKS
-kubectl create secret generic csv-loader-tls \
-  --from-file=server.jks=./server.jks \
-  -n apilayer
+```powershell
+kubectl create secret generic csv-loader-tls --from-file=server.jks=./server.jks -n apilayer
+```
 
-# 2. Secret con la password del keystore JKS
-kubectl create secret generic csv-loader-tls-password \
-  --from-literal=password="PasswordSicura123!" \
-  -n apilayer
+```powershell
+kubectl create secret generic csv-loader-tls-password --from-literal=password="PasswordSicura123!" -n apilayer
 ```
 
 *(In alternativa tramite interfaccia grafica Rancher: andare nel namespace `apilayer` > **Storage > Secrets** e creare i due secret inserendo rispettivamente il file con chiave `server.jks` e il testo della password con chiave `password`).*
